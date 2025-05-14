@@ -346,8 +346,11 @@ async fn auth_twitch_new_access_token(
     // temporary http server that will extract the twitch user's auth code.
     println!("Sending twitch auth request.");
     let redirect_uri = format!("{}/twitch_auth_callback", server_url);
-    let scope = "user:read:chat";
-    let scope_urlencoded = urlencoding::encode(scope);
+    let scopes = ["user:read:chat", "user:write:chat"];
+    let scope_urlencoded = (|| {
+        let scopes_joined = scopes.join(" ");
+        urlencoding::encode(scopes_joined.as_str()).into_owned()
+    })();
     let state = "placeholder";
     let twitch_uri = format!(
         "https://id.twitch.tv/oauth2/authorize\
