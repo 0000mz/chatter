@@ -1,4 +1,5 @@
-use iced::widget::{button, column, rich_text, span};
+use async_trait::async_trait;
+use iced::widget::{column, rich_text, span};
 use iced::{Font, color, font};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -19,15 +20,21 @@ async fn main() -> iced::Result {
 }
 
 #[derive(Debug, Clone)]
+enum MessageStreamType {
+    TwitchInitializer(TwitchMessageStreamInitializer),
+    CsvInitializer(CsvMessageStreamInitializer),
+    CsvMessageStream(CsvMessageStream),
+    TwitchMessageStream(TwitchMessageStream),
+    InvalidStream,
+}
+
+#[derive(Debug, Clone)]
 enum Message {
     InitializeChat,
     InitializeChatError(String),
+    AttachMessageStream(MessageStreamType),
     MessageStreamListen,
-    AuthTwitch,
-    AuthTwitchResult(bool),
-    // Attach the chat stream to the streamchat instance to receive messages from the channel.
-    // The parameter should be the twitch stream name to attach.
-    AttachChatStream(/*stream_name*/ String),
+    Terminate,
 }
 
 struct StreamChat {
@@ -45,7 +52,7 @@ impl StreamChat {
         }
     }
 
-    fn create_message_stream(&self) -> std::result::Result<Box<dyn MessageStream>, String> {
+    fn create_message_stream_initializer(&self) -> std::result::Result<MessageStreamType, String> {
         let url_parts = self.stream_chat_url.splitn(2, "://").collect::<Vec<_>>();
         if url_parts.len() != 2 {
             return Err(String::from("Invalid url, no protocol found."));
@@ -53,23 +60,77 @@ impl StreamChat {
 
         let (protocol, path) = (url_parts[0], url_parts[1]);
         match protocol {
-            "file" => Ok(Box::new(CsvMessageStream::new_from_file(path))),
+            "file" => Ok(MessageStreamType::CsvInitializer(
+                CsvMessageStreamInitializer::new_from_file(path),
+            )),
+            "twitch" => Ok(MessageStreamType::TwitchInitializer(
+                TwitchMessageStreamInitializer::new_for_stream(path),
+            )),
             _ => Err(String::from(format!("Invalid protocol: {}", protocol))),
         }
     }
 
     fn update(&mut self, message: Message) -> iced::Task<Message> {
         match message {
-            Message::InitializeChat => match self.create_message_stream() {
-                Ok(message_stream) => {
-                    self.stream = Some(message_stream);
-                    iced::Task::done(Message::MessageStreamListen)
-                }
+            Message::InitializeChat => match self.create_message_stream_initializer() {
+                Ok(MessageStreamType::CsvInitializer(mut initializer)) => iced::Task::perform(
+                    (|| async move {
+                        let stream = initializer.init_stream().await;
+                        if let Some(csv) = (*stream).as_any().downcast_ref::<CsvMessageStream>() {
+                            MessageStreamType::CsvMessageStream(csv.clone())
+                        } else {
+                            MessageStreamType::InvalidStream
+                        }
+                    })(),
+                    Message::AttachMessageStream,
+                ),
+                Ok(MessageStreamType::TwitchInitializer(mut initializer)) => iced::Task::perform(
+                    (|| async move {
+                        let stream = initializer.init_stream().await;
+                        if let Some(twitch) =
+                            (*stream).as_any().downcast_ref::<TwitchMessageStream>()
+                        {
+                            MessageStreamType::TwitchMessageStream(twitch.clone())
+                        } else {
+                            MessageStreamType::InvalidStream
+                        }
+                    })(),
+                    Message::AttachMessageStream,
+                ),
+                Ok(stream_type) => iced::Task::done(Message::InitializeChatError(format!(
+                    "Unknown stream type: {:?}",
+                    stream_type
+                ))),
                 Err(err) => iced::Task::done(Message::InitializeChatError(err)),
             },
+            Message::AttachMessageStream(stream_type) => {
+                if self.stream.is_some() {
+                    iced::Task::done(Message::InitializeChatError(String::from(
+                        "A stream is already attached; cannot attach another stream.",
+                    )))
+                } else {
+                    match stream_type {
+                        MessageStreamType::CsvMessageStream(csv_stream) => {
+                            self.stream = Some(Box::new(csv_stream));
+                        }
+                        MessageStreamType::TwitchMessageStream(twitch_stream) => {
+                            self.stream = Some(Box::new(twitch_stream));
+                        }
+                        _ => {
+                            return iced::Task::done(Message::InitializeChatError(format!(
+                                "Failed to extract message stream from: {:?}",
+                                stream_type
+                            )));
+                        }
+                    }
+                    assert!(self.stream.is_some());
+                    iced::Task::done(Message::MessageStreamListen)
+                }
+            }
             Message::InitializeChatError(error_message) => {
-                todo!("Show some error dialog here...: {}", error_message);
-                // iced::Task::done(Message::InitializeChatError(error_message))
+                // TODO: display the error in some modal.
+                eprintln!("Erorr: {}", error_message);
+                iced::Task::done(Message::Terminate)
             }
             Message::MessageStreamListen => {
                 let new_messages = self.stream.as_mut().unwrap().collect_messages();
@@ -81,23 +142,19 @@ impl StreamChat {
                 }
                 iced::Task::done(Message::MessageStreamListen)
             }
-            Message::AuthTwitch => iced::Task::perform(auth_twitch(), Message::AuthTwitchResult),
-            Message::AuthTwitchResult(success) => {
-                if success {
-                    iced::Task::done(Message::AttachChatStream(String::from("caedrel")))
+            Message::Terminate => iced::window::get_oldest().then(|id| {
+                if let Some(id) = id {
+                    iced::window::close(id)
                 } else {
-                    todo!("Handle auth failures here...");
+                    eprintln!("Failed to terminate -- could not acquire window id.");
+                    iced::Task::none()
                 }
-            }
-            Message::AttachChatStream(stream_name) => {
-                println!("TODO Attach chat stream for channel: {}", stream_name);
-                iced::Task::none()
-            }
+            }),
         }
     }
 
     fn view(&self) -> iced::Element<Message> {
-        let mut v = column![button("Auth Twitch").on_press(Message::AuthTwitch)];
+        let mut v = column![];
         for msg in &self.active_messages {
             v = v.push(
                 rich_text![
@@ -116,12 +173,38 @@ impl StreamChat {
     }
 }
 
-trait MessageStream {
+// Helper trait to transform a type T to any.
+// Useful for downcasting dyn Trait to concrete type dyn T.
+pub trait AToAny: 'static {
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+impl<T: 'static> AToAny for T {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[async_trait]
+trait MessageStream: AToAny {
     fn collect_messages(&mut self) -> Vec<UserMessage>;
 }
 
 struct CsvMessageStream {
     messages: VecDeque<UserMessage>,
+}
+
+impl std::fmt::Debug for CsvMessageStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        write!(f, "CsvMessageStream <>")
+    }
+}
+
+impl Clone for CsvMessageStream {
+    fn clone(&self) -> Self {
+        CsvMessageStream {
+            messages: self.messages.clone(),
+        }
+    }
 }
 
 impl MessageStream for CsvMessageStream {
@@ -147,7 +230,36 @@ impl MessageStream for CsvMessageStream {
     }
 }
 
-impl CsvMessageStream {
+#[async_trait]
+trait MessageStreamInitializer {
+    async fn init_stream(&mut self) -> Box<dyn MessageStream>;
+}
+
+#[derive(Clone)]
+struct CsvMessageStreamInitializer {
+    messages: VecDeque<UserMessage>,
+}
+
+impl std::fmt::Debug for CsvMessageStreamInitializer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        write!(
+            f,
+            "CsvMessageStreamInitializer <# messages = {}>",
+            self.messages.len()
+        )
+    }
+}
+
+#[async_trait]
+impl MessageStreamInitializer for CsvMessageStreamInitializer {
+    async fn init_stream(&mut self) -> Box<dyn MessageStream> {
+        Box::new(CsvMessageStream {
+            messages: self.messages.clone(),
+        })
+    }
+}
+
+impl CsvMessageStreamInitializer {
     fn new_from_file(filepath: &str) -> Self {
         let now = std::time::Instant::now();
         let timestamp_fn = |duration_sec: u64| {
@@ -175,8 +287,58 @@ impl CsvMessageStream {
                 timestamp_fn(duration_sec),
             ));
         }
-        CsvMessageStream {
+        CsvMessageStreamInitializer {
             messages: user_messages.into(),
+        }
+    }
+}
+
+struct TwitchMessageStream {
+    stream_name: String,
+}
+
+impl std::fmt::Debug for TwitchMessageStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        write!(f, "TwitchMessageStream <channel = {}>", self.stream_name)
+    }
+}
+
+impl Clone for TwitchMessageStream {
+    fn clone(&self) -> Self {
+        TwitchMessageStream {
+            stream_name: self.stream_name.clone(),
+        }
+    }
+}
+
+impl MessageStream for TwitchMessageStream {
+    fn collect_messages(&mut self) -> Vec<UserMessage> {
+        eprintln!("TwitchMessageStream::collect_messages: no messages to collet yet...");
+        Vec::new()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TwitchMessageStreamInitializer {
+    stream_name: String,
+}
+
+#[async_trait]
+impl MessageStreamInitializer for TwitchMessageStreamInitializer {
+    async fn init_stream(&mut self) -> Box<dyn MessageStream> {
+        if let Err(twitch_auth_err) = setup_twitch_oauth().await {
+            eprintln!("error: {}", twitch_auth_err);
+        }
+        Box::new(TwitchMessageStream {
+            stream_name: String::from(self.stream_name.clone()),
+        })
+    }
+}
+
+impl TwitchMessageStreamInitializer {
+    fn new_for_stream(stream: &str) -> Self {
+        TwitchMessageStreamInitializer {
+            stream_name: String::from(stream),
         }
     }
 }
@@ -195,13 +357,6 @@ impl UserMessage {
             message: message.into(),
             timestamp,
         }
-    }
-}
-
-async fn auth_twitch() -> bool {
-    match auth_twitch_wrap().await {
-        Ok(res) => res,
-        Err(_) => false,
     }
 }
 
@@ -224,7 +379,11 @@ struct TwitchAuthPayload {
     expiration_timestamp: std::time::Instant,
 }
 
-async fn auth_twitch_wrap() -> Result<bool, reqwest::Error> {
+// Setup the twitch user authentication.
+// - Acquires the user's access and refresh token that will be
+//   used for interacting with the Twitch API.
+// - Stores the token information into the appdata storage.
+async fn setup_twitch_oauth() -> Result<bool, reqwest::Error> {
     let home_path = std::env::var("HOME").unwrap();
     let appdata_path = format!("{}/.streamchat", home_path);
     if !std::path::Path::new(appdata_path.as_str()).exists() {
