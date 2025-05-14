@@ -258,8 +258,8 @@ async fn auth_twitch_wrap() -> Result<bool, reqwest::Error> {
     if let None = app_config.twitch_auth {
         println!("No twitch user access token in app config; regenerating...");
         match auth_twitch_new_access_token(
-            api_config.twitch_api_client_id,
-            api_config.twitch_api_secret,
+            api_config.twitch_api_client_id.as_str(),
+            api_config.twitch_api_secret.as_str(),
         )
         .await?
         {
@@ -276,12 +276,108 @@ async fn auth_twitch_wrap() -> Result<bool, reqwest::Error> {
     let updated_app_config_str = toml::to_string(&app_config).unwrap();
     std::fs::write(config_path, updated_app_config_str).unwrap();
 
+    // Subscribe to the EventSub for receiving chat messages.
+    println!("Attempting to subscribe to twitch chat event sub.");
+    match auth_twitch_chat_event_sub(
+        api_config.twitch_api_client_id.as_str(),
+        app_config.twitch_auth.unwrap().access_token.as_str(),
+    )
+    .await
+    {
+        Ok(success) => {
+            println!("auth_twitch_chat_event_sub: success={}", success);
+        }
+        Err(err) => {
+            eprintln!("auth_twitch_chat_event_sub: err={:?}", err);
+        }
+    }
+
+    Ok(true)
+}
+
+async fn auth_twitch_chat_event_sub(
+    client_id: &str,
+    access_token: &str,
+) -> Result<bool, reqwest::Error> {
+    let client = reqwest::Client::new();
+
+    let bearer_str = format!("Bearer {}", access_token);
+
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        "Authorization",
+        reqwest::header::HeaderValue::from_str(bearer_str.as_str()).unwrap(),
+    );
+    headers.insert(
+        "Client-Id",
+        reqwest::header::HeaderValue::from_str(client_id).unwrap(),
+    );
+    headers.insert(
+        "Content-Type",
+        reqwest::header::HeaderValue::from_static("application/json"),
+    );
+
+    #[derive(Serialize)]
+    struct InlineEventSubCondition {
+        broadcaster_user_id: String,
+        user_id: String,
+    }
+
+    #[derive(Serialize)]
+    struct InlineTransport {
+        method: String,
+        session_id: String,
+    }
+
+    #[derive(Serialize)]
+    struct TwitchEventSubRequestBody {
+        #[serde(rename(serialize = "type"))]
+        reqtype: String,
+        version: String,
+        condition: InlineEventSubCondition,
+        transport: InlineTransport,
+    }
+
+    let body = TwitchEventSubRequestBody {
+        reqtype: String::from("channel.chat.message"),
+        version: String::from("1"),
+        condition: InlineEventSubCondition {
+            broadcaster_user_id: String::from("23211159" /* atrioc */),
+            // TODO: Do not hardcode the user IDs into the request...
+            user_id: String::from("76000742" /* infallible_mob_ */),
+        },
+        transport: InlineTransport {
+            method: String::from("websocket"),
+            // TODO: replace session id...
+            session_id: String::from("example_session_id"),
+        },
+    };
+
+    // TODO: More info on how to connect to twitch eventsub:
+    // https://discuss.dev.twitch.com/t/eventsub-websockets-subscriptions-failing/41879/2
+
+    let response = client
+        .post("https://api.twitch.tv/helix/eventsub/subscriptions")
+        .headers(headers)
+        .json(&body)
+        .send()
+        .await?;
+
+    println!("EventSub.channel_messages = Response={}", response.status());
+    if response.status() != reqwest::StatusCode::OK {
+        eprintln!("Bad response status...");
+        if let Ok(response_body) = response.text().await {
+            eprintln!("Response body={}", response_body);
+        }
+        return Ok(false);
+    }
+
     Ok(true)
 }
 
 async fn auth_twitch_new_access_token(
-    twitch_client_id: String,
-    twitch_secret: String,
+    twitch_client_id: &str,
+    twitch_secret: &str,
 ) -> Result<Option<TwitchAuthPayload>, reqwest::Error> {
     // Start a server to handle the twitch auth path.
     let secret_code = 204;
@@ -396,8 +492,8 @@ async fn auth_twitch_new_access_token(
     // Use the authorization token to get the user token and referesh token...
     println!("Using authorization code to get user's access and referch tokens.");
     let user_token_params = [
-        ("client_id", twitch_client_id.as_str()),
-        ("client_secret", twitch_secret.as_str()),
+        ("client_id", twitch_client_id),
+        ("client_secret", twitch_secret),
         ("code", authorization_code.as_str()),
         ("grant_type", "authorization_code"),
         ("redirect_uri", redirect_uri.as_str()),
