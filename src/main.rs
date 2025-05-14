@@ -289,6 +289,7 @@ async fn auth_twitch_new_access_token(
     let (tx, rx) = std::sync::mpsc::channel();
     let (exit_send, exit_recv) = std::sync::mpsc::channel();
 
+    let state = uuid::Uuid::new_v4();
     let server = rouille::Server::new(format!("0.0.0.0:{}", port), move |request| {
         rouille::log(request, std::io::stdout(), || {
             rouille::router!(request,
@@ -297,14 +298,24 @@ async fn auth_twitch_new_access_token(
                 rouille::Response::text(format!("PONG {}", secret_code))
               },
               (GET) (/twitch_auth_callback) => {
-                match request.get_param("code") {
+                match request.get_param("state") {
                   None => {
-                    rouille::Response::text("Failed to authenticate user...")
+                    rouille::Response::text("Failed to acquire state.")
                   },
-                  Some(code) => {
-                    // TODO: Also verify state...
-                    tx.send(code).unwrap();
-                    rouille::Response::html("Auth successful, return to app.")
+                  Some(returned_state) => {
+                    if returned_state != state.to_string() {
+                      rouille::Response::text(format!("Invalid state received... expected={} actual={}", state, returned_state))
+                    } else {
+                      match request.get_param("code") {
+                        None => {
+                          rouille::Response::text("Failed to authenticate user...")
+                        },
+                        Some(code) => {
+                          tx.send(code).unwrap();
+                          rouille::Response::html("Auth successful, return to app.")
+                        }
+                      }
+                    }
                   }
                 }
               },
@@ -351,7 +362,6 @@ async fn auth_twitch_new_access_token(
         let scopes_joined = scopes.join(" ");
         urlencoding::encode(scopes_joined.as_str()).into_owned()
     })();
-    let state = "placeholder";
     let twitch_uri = format!(
         "https://id.twitch.tv/oauth2/authorize\
         ?response_type=code\
