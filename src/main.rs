@@ -106,7 +106,11 @@ impl StreamChat {
                 .size(14),
             );
         }
-        v.into()
+
+        iced::widget::scrollable(v)
+            .width(iced::Fill)
+            .anchor_bottom()
+            .into()
     }
 }
 
@@ -149,7 +153,6 @@ fn message_stream_sub() -> impl iced::task::Sipper<iced::task::Never, Message> {
                 loop {
                     let user_messages = stream.collect_messages().await;
                     if user_messages.len() > 0 {
-                        println!("Received {} messages, sending...", user_messages.len());
                         output.send(Message::MessagePost(user_messages)).await;
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
