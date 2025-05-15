@@ -569,8 +569,10 @@ async fn auth_twitch_chat_event_sub(
     Ok(Some(rx))
 }
 
+// If user_name is None, it will get the user id for the current oauth token.
+// Otherwise, it wil lget the user id for the requested twitch user_name.
 async fn twitch_get_user_id_from_name(
-    user_name: &str,
+    user_name: Option<&str>,
     client_id: &str,
     access_token: &str,
 ) -> Result<Option<String>, reqwest::Error> {
@@ -592,14 +594,11 @@ async fn twitch_get_user_id_from_name(
         reqwest::header::HeaderValue::from_static("application/json"),
     );
 
-    let response = client
-        .get(format!(
-            "https://api.twitch.tv/helix/users?login={}",
-            user_name
-        ))
-        .headers(headers)
-        .send()
-        .await?;
+    let url = match user_name {
+        Some(user_name) => format!("https://api.twitch.tv/helix/users?login={}", user_name),
+        None => String::from("https://api.twitch.tv/helix/users"),
+    };
+    let response = client.get(url).headers(headers).send().await?;
 
     if response.status() != reqwest::StatusCode::OK {
         Ok(None)
@@ -634,17 +633,22 @@ async fn auth_twitch_chat_event_sub_init(
     client_id: &str,
     access_token: &str,
 ) -> Result<bool, reqwest::Error> {
-    let streamer_id = twitch_get_user_id_from_name(stream_name, client_id, access_token).await?;
+    let streamer_id =
+        twitch_get_user_id_from_name(Some(stream_name), client_id, access_token).await?;
     if let None = streamer_id {
         eprintln!("Invalid twitch user: {}", stream_name);
         return Ok(false);
     }
     let streamer_id = streamer_id.unwrap();
+    let user_id = twitch_get_user_id_from_name(None, client_id, access_token).await?;
+    if let None = user_id {
+        eprintln!("Failed to get user id for current authenticated user.");
+        return Ok(false);
+    }
+    let user_id = user_id.unwrap();
 
     let client = reqwest::Client::new();
-
     let bearer_str = format!("Bearer {}", access_token);
-
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
         "Authorization",
@@ -685,8 +689,7 @@ async fn auth_twitch_chat_event_sub_init(
         version: String::from("1"),
         condition: InlineEventSubCondition {
             broadcaster_user_id: String::from(streamer_id),
-            // TODO: Do not hardcode the user IDs into the request...
-            user_id: String::from("76000742" /* infallible_mob_ */),
+            user_id: String::from(user_id),
         },
         transport: InlineTransport {
             method: String::from("websocket"),
@@ -862,6 +865,7 @@ async fn auth_twitch_new_access_token(
         refresh_token: String,
         expires_in: u64,
     }
+
     let twitch_user_pload: InlineTwitchAuthPayload =
         serde_json::from_str(payload.as_str()).unwrap();
 
