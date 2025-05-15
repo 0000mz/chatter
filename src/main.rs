@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use iced::futures::StreamExt;
-use iced::widget::{column, rich_text, span};
+use iced::widget::{column, rich_text, row, span};
 use iced::{Font, color, font};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -205,8 +205,12 @@ impl StreamChat {
                 .width(iced::Fill)
                 .height(iced::Fill)
                 .anchor_bottom(),
-            iced::widget::text_input("Send chat message...", self.input_message.as_str())
-                .on_input(Message::InputMessageChanged),
+            row![
+                iced::widget::text_input("Send chat message...", self.input_message.as_str())
+                    .width(iced::Fill)
+                    .on_input(Message::InputMessageChanged),
+                iced::widget::button("Send").on_press(Message::SendInputMessage)
+            ]
         ]
         .into()
     }
