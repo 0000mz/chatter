@@ -1,7 +1,8 @@
 name,message,timestamp_sec
 John,First Message,0
-Billy,Second Mesage,3
-Jeremiah,Third message,5
-JimBob,Yo @John how's it going,6
-John,Oh hi @JimBob. Long time no see!,7
-Billy,Why the hell would you name yourself JimBob lmaooo,8
+Billy,Second Mesage,1
+Jeremiah,Third message,2
+JimBob,Yo @John how's it going,3
+John,Oh hi @JimBob. Long time no see!,4
+Billy,Why the hell would you name yourself JimBob lmaooo,5
+Joe,Another message,6
