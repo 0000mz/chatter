@@ -365,19 +365,8 @@ fn message_stream_sub() -> impl iced::task::Sipper<iced::task::Never, Message> {
     })
 }
 
-// Helper trait to transform a type T to any.
-// Useful for downcasting dyn Trait to concrete type dyn T.
-pub trait AToAny: 'static {
-    fn as_any(&self) -> &dyn std::any::Any;
-}
-impl<T: 'static> AToAny for T {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
-
 #[async_trait]
-trait MessageStream: AToAny + Send + Sync {
+trait MessageStream: Send + Sync {
     async fn next_message(&mut self) -> Option<UserMessage>;
     fn get_broadcaster_and_user_id(&self) -> Option<(String, String, String)>;
 }
