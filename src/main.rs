@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use iced::futures::StreamExt;
-use iced::widget::{column, rich_text, row, span};
+use iced::widget::{column, image, rich_text, row, span};
 use iced::{Font, color, font};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -202,33 +202,69 @@ impl StreamChat {
     fn view(&self) -> iced::Element<Message> {
         let mut v = column![];
         for msg in &self.active_messages {
-            v = v.push(
-                iced::widget::container(
-                    rich_text![
-                        span(format!("{}: ", &msg.username))
-                            .color(color!(0xff0000))
-                            .font(Font {
-                                weight: font::Weight::Bold,
-                                ..Font::default()
-                            }),
-                        span(&msg.message)
-                    ]
-                    // Filler to supress compiler.
+            let msg_text = rich_text![
+                span(format!("{}: ", &msg.username))
+                    .color(color!(0xff0000))
+                    .font(Font {
+                        weight: font::Weight::Bold,
+                        ..Font::default()
+                    }),
+                span(&msg.message),
+            ]
+            // Filler to supress compiler.
+            .on_link_click(|_link: u32| Message::Terminate)
+            .size(14);
+            // let msg_text = iced::widget::container(
+            //     rich_text![
+            //         span(format!("{}: ", &msg.username))
+            //             .color(color!(0xff0000))
+            //             .font(Font {
+            //                 weight: font::Weight::Bold,
+            //                 ..Font::default()
+            //             }),
+            //         span(&msg.message),
+            //     ]
+            //     // Filler to supress compiler.
+            //     .on_link_click(|_link: u32| Message::Terminate)
+            //     .size(14),
+            // )
+            // .style(
+            //     if let Some(user_id) = self.user_id.as_ref()
+            //         && msg.user_id.as_str() == user_id.as_str()
+            //     {
+            //         AppStyle::highlighted_comment
+            //     } else {
+            //         AppStyle::unhighlighted_comment
+            //     },
+            // )
+            // .padding([0, 10])
+            // .width(iced::Fill);
+
+            // Can use images side by side with rich_text to represent inline emotes!
+            let width: u32 = 20;
+            let height: u32 = 20;
+            let pixel_values: Vec<u8> = [255, 255, 255]
+                .iter()
+                .cycle()
+                .take(3 * width as usize * height as usize)
+                .copied()
+                .collect();
+            let image_handle = image::Handle::from_bytes(pixel_values);
+
+            // example of fetching an image and using it to create an image handle:
+            // https://github.com/iced-rs/iced/blob/9a7ea88d55c745076a55560a33222f3676a0f21b/examples/pokedex/src/main.rs#L186
+            let r = row![
+                msg_text,
+                iced::widget::container(iced::widget::image("data/image.png").width(20))
+                    .padding([0, 2]),
+                rich_text![span("some more stuff..")]
                     .on_link_click(|_link: u32| Message::Terminate)
                     .size(14),
-                )
-                .style(
-                    if let Some(user_id) = self.user_id.as_ref()
-                        && msg.user_id.as_str() == user_id.as_str()
-                    {
-                        AppStyle::highlighted_comment
-                    } else {
-                        AppStyle::unhighlighted_comment
-                    },
-                )
-                .padding([0, 10])
-                .width(iced::Fill),
-            );
+                iced::widget::image(image_handle)
+                    .width(width)
+                    .height(height)
+            ];
+            v = v.push(r);
         }
 
         column![
