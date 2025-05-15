@@ -23,7 +23,7 @@ enum Message {
     InitializeApp,
     UpdateAppConfig(Option<(ApiConfig, AppConfig)>),
     InitializeChatError(String),
-    MessagePost(Vec<UserMessage>),
+    MessagePost(UserMessage),
     // If bool is true, then the stream has been initialized in the
     // subscription successfully.
     MessageStreamInitState(bool),
@@ -111,10 +111,8 @@ impl StreamChat {
                 eprintln!("Erorr: {}", error_message);
                 iced::Task::done(Message::Terminate)
             }
-            Message::MessagePost(messages) => {
-                for message in messages {
-                    self.active_messages.push_back(message);
-                }
+            Message::MessagePost(message) => {
+                self.active_messages.push_back(message);
                 // TODO: Optimize, do not remove one by one...
                 while self.active_messages.len() > 100 {
                     self.active_messages.pop_front();
@@ -356,11 +354,11 @@ fn message_stream_sub() -> impl iced::task::Sipper<iced::task::Never, Message> {
 
                 output.send(Message::MessageStreamInitState(true)).await;
                 loop {
-                    let user_messages = stream.collect_messages().await;
-                    if user_messages.len() > 0 {
-                        output.send(Message::MessagePost(user_messages)).await;
+                    let user_message = stream.next_message().await;
+                    if let Some(user_message) = user_message {
+                        output.send(Message::MessagePost(user_message)).await;
                     }
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    tokio::time::sleep(std::time::Duration::from_nanos(100)).await;
                 }
             }
         }
@@ -380,7 +378,7 @@ impl<T: 'static> AToAny for T {
 
 #[async_trait]
 trait MessageStream: AToAny + Send + Sync {
-    async fn collect_messages(&mut self) -> Vec<UserMessage>;
+    async fn next_message(&mut self) -> Option<UserMessage>;
     fn get_broadcaster_and_user_id(&self) -> Option<(String, String, String)>;
 }
 
@@ -429,32 +427,19 @@ impl MessageStream for CsvMessageStream {
         None
     }
 
-    async fn collect_messages(&mut self) -> Vec<UserMessage> {
-        let mut released_messages = vec![];
+    async fn next_message(&mut self) -> Option<UserMessage> {
         let mut itr = self.messages.iter();
-        let mut nb_released = 0;
 
-        while let Some(message) = itr.next() {
-            if std::time::Instant::now() >= message.timestamp {
-                released_messages.push(message.clone());
-                nb_released += 1;
-            } else {
-                break;
-            }
+        let mut next_user_message = None;
+        if let Some(message) = itr.next()
+            && std::time::Instant::now() >= message.timestamp
+        {
+            next_user_message = Some(message.clone());
         }
-
-        for _ in 0..nb_released {
+        if next_user_message.is_some() {
             self.messages.pop_front();
         }
-        if nb_released > 0 {
-            println!(
-                "CsvMessageStream: nb_released={} nb_remaining={}",
-                nb_released,
-                self.messages.len()
-            );
-        }
-
-        released_messages
+        next_user_message
     }
 }
 
@@ -550,18 +535,10 @@ impl MessageStream for TwitchMessageStream {
         ))
     }
 
-    async fn collect_messages(&mut self) -> Vec<UserMessage> {
+    async fn next_message(&mut self) -> Option<UserMessage> {
         match self.message_stream_received.as_mut() {
-            None => Vec::new(),
-            Some(rx) => {
-                // TODO: Instead of creating a vector for each message, either get rid of the
-                // vector or batch the messages together.
-                if let Some(message) = rx.recv().await {
-                    vec![message]
-                } else {
-                    Vec::new()
-                }
-            }
+            None => None,
+            Some(rx) => rx.recv().await,
         }
     }
 }

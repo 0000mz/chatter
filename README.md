@@ -18,6 +18,22 @@ twitch_api_client_id = "<....>"
 twitch_api_secret = "<....>"
 ```
 
+## Debugging
+### Profiling
+Using the `samply` program (https://github.com/mstange/samply/), you can record a profile of the application
+by building the release version and starting the application with samply:
+
+```
+# Install samply
+cargo install --git https://github.com/mstange/samply.git samply
+
+# Build release
+RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release
+
+# Run app while recording profile
+samply record target/release/streamchat "twitch://northernlion"
+```
+
 ## TODO
 - Create an initialization bootstrap to guide the setup of API information.
 - When user scrolls up in the chat, do not append new messages. This should prevent the chat moving away when
