@@ -192,7 +192,15 @@ impl StreamChat {
                             weight: font::Weight::Bold,
                             ..Font::default()
                         }),
-                    span(&msg.message)
+                    span(&msg.message).color(
+                        if let Some(user_id) = self.user_id.as_ref()
+                            && msg.user_id.as_str() == user_id.as_str()
+                        {
+                            color!(0xff0000)
+                        } else {
+                            color!(0xffffff)
+                        }
+                    )
                 ]
                 // Filler to supress compiler.
                 .on_link_click(|_link: u32| Message::Terminate)
@@ -315,6 +323,7 @@ impl CsvMessageStream {
             }
             let duration_sec = parts[2].parse().expect("Expected number.");
             user_messages.push(UserMessage::new(
+                parts[0], // username as user id
                 parts[0],
                 parts[1],
                 timestamp_fn(duration_sec),
@@ -467,14 +476,16 @@ impl MessageStream for TwitchMessageStream {
 
 #[derive(Clone)]
 struct UserMessage {
+    user_id: String,
     username: String,
     message: String,
     timestamp: std::time::Instant,
 }
 
 impl UserMessage {
-    fn new(username: &str, message: &str, timestamp: std::time::Instant) -> Self {
+    fn new(user_id: &str, username: &str, message: &str, timestamp: std::time::Instant) -> Self {
         UserMessage {
+            user_id: user_id.into(),
             username: username.into(),
             message: message.into(),
             timestamp,
@@ -724,6 +735,9 @@ async fn auth_twitch_chat_event_sub(
                         let chatter_username = event_data
                             .and_then(|value| value.get("chatter_user_name"))
                             .and_then(|value| value.as_str());
+                        let chatter_user_id = event_data
+                            .and_then(|value| value.get("chatter_user_id"))
+                            .and_then(|value| value.as_str());
                         // TODO: There is also a message.fragments field that
                         // partitions the message into its message, emote and mention components.
                         let chatter_message = event_data
@@ -731,11 +745,15 @@ async fn auth_twitch_chat_event_sub(
                             .and_then(|value| value.get("text"))
                             .and_then(|value| value.as_str());
 
-                        if let (Some(chatter_username), Some(chatter_message)) =
-                            (chatter_username, chatter_message)
+                        if let (
+                            Some(chatter_username),
+                            Some(chatter_user_id),
+                            Some(chatter_message),
+                        ) = (chatter_username, chatter_user_id, chatter_message)
                         {
                             if let Err(_) = tx
                                 .send(UserMessage {
+                                    user_id: String::from(chatter_user_id),
                                     username: String::from(chatter_username),
                                     message: String::from(chatter_message),
                                     timestamp: std::time::Instant::now(), // TODO: parse the timestamp from the payload...

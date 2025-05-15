@@ -20,4 +20,3 @@ twitch_api_secret = "<....>"
 
 ## TODO
 - Create an initialization bootstrap to guide the setup of API information.
-- Highlight messages from logged-in user for better visibility.
