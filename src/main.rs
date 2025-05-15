@@ -13,6 +13,7 @@ fn main() -> iced::Result {
     }
     iced::application(StreamChat::boot, StreamChat::update, StreamChat::view)
         .subscription(StreamChat::subscription)
+        .style(StreamChat::style)
         .run()
 }
 
@@ -65,6 +66,13 @@ impl StreamChat {
             app_config: None,
             broadcaster_id: None,
             user_id: None,
+        }
+    }
+
+    fn style(&self, _: &iced::Theme) -> iced::theme::Style {
+        iced::theme::Style {
+            background_color: iced::color!(0x000000),
+            text_color: iced::color!(0xffffff),
         }
     }
 
