@@ -28,6 +28,7 @@ enum Message {
     // subscription successfully.
     MessageStreamInitState(bool),
     InputMessageChanged(String),
+    CommandPaletteSearchChanged(String),
     SaveBroadcasterInfo((String, String)),
     SaveUserId(String),
     SendInputMessage,
@@ -52,6 +53,8 @@ struct StreamChat {
     broadcaster_id: Option<String>,
     broadcaster_name: Option<String>,
     user_id: Option<String>,
+    command_palette_active: bool,
+    command_palette_search: String,
 }
 
 impl StreamChat {
@@ -69,6 +72,8 @@ impl StreamChat {
             broadcaster_id: None,
             broadcaster_name: None,
             user_id: None,
+            command_palette_active: false,
+            command_palette_search: String::new(),
         }
     }
 
@@ -133,6 +138,10 @@ impl StreamChat {
             }),
             Message::InputMessageChanged(message) => {
                 self.input_message = message;
+                iced::Task::none()
+            }
+            Message::CommandPaletteSearchChanged(search) => {
+                self.command_palette_search = search;
                 iced::Task::none()
             }
             Message::SendInputMessage => {
@@ -231,7 +240,7 @@ impl StreamChat {
             );
         }
 
-        column![
+        let base_ui = column![
             iced::widget::container(row![
                 iced::widget::container(iced::widget::text(
                     if let Some(name) = self.broadcaster_name.as_ref() {
@@ -289,8 +298,44 @@ impl StreamChat {
                     })
                     .padding([10, 20])
             ]
-        ]
-        .into()
+        ];
+
+        // TODO: make the command palette width not larger than the window's width.
+        let command_palette_width = 600;
+        let command_palette_layer = column![
+            iced::widget::vertical_space().height(200),
+            row![
+                iced::widget::horizontal_space(),
+                iced::widget::text_input("Command Palette", self.command_palette_search.as_str())
+                    .on_input(Message::CommandPaletteSearchChanged)
+                    .width(command_palette_width)
+                    .padding([10, 10])
+                    .style(|theme, status| {
+                        let mut style = iced::widget::text_input::default(theme, status);
+                        style.border.radius.top_right = 5.0; // = iced::border::radius(5.0);
+                        style.border.radius.top_left = 5.0;
+                        style.border.radius.bottom_right = 0.0;
+                        style.border.radius.bottom_left = 0.0;
+                        style
+                    }),
+                iced::widget::horizontal_space(),
+            ],
+            row![
+                iced::widget::horizontal_space(),
+                iced::widget::container(iced::widget::text("Show results here..."))
+                    .width(command_palette_width)
+                    .padding(20)
+                    .style(|_theme| { iced::widget::container::background(color!(0xffffff)) }),
+                iced::widget::horizontal_space(),
+            ],
+        ];
+        iced::widget::stack![base_ui]
+            .push_maybe(if self.command_palette_active {
+                Some(command_palette_layer)
+            } else {
+                None
+            })
+            .into()
     }
 }
 
