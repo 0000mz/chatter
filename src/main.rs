@@ -28,13 +28,13 @@ enum Message {
     // subscription successfully.
     MessageStreamInitState(bool),
     InputMessageChanged(String),
-    CommandPaletteSearchChanged(String),
     SaveBroadcasterInfo((String, String)),
     SaveUserId(String),
     SendInputMessage,
     // If true, the command palette will be set to active.
     // Otherwise, it will be set to inactive.
     ToggleCommandPalette(bool),
+    CommandPaletteSearchChanged(String),
     // Received when the ESC key is pressed. What should happen depends
     // entirely on the current state of the application.
     // i.e. if the current focus is the command palette, then exit it.
@@ -63,8 +63,7 @@ struct StreamChat {
     broadcaster_id: Option<String>,
     broadcaster_name: Option<String>,
     user_id: Option<String>,
-    command_palette_active: bool,
-    command_palette_search: String,
+    command_palette_ctx: CommandPalette,
 }
 
 impl StreamChat {
@@ -82,8 +81,7 @@ impl StreamChat {
             broadcaster_id: None,
             broadcaster_name: None,
             user_id: None,
-            command_palette_active: false,
-            command_palette_search: String::new(),
+            command_palette_ctx: CommandPalette::new(),
         }
     }
 
@@ -154,7 +152,7 @@ impl StreamChat {
                 iced::Task::none()
             }
             Message::CommandPaletteSearchChanged(search) => {
-                self.command_palette_search = search;
+                self.command_palette_ctx.update_current_from_query(search);
                 iced::Task::none()
             }
             Message::SendInputMessage => {
@@ -202,13 +200,15 @@ impl StreamChat {
                 iced::Task::none()
             }
             Message::ToggleCommandPalette(enabled) => {
-                self.command_palette_active = enabled;
+                self.command_palette_ctx.active = enabled;
                 iced::widget::text_input::focus("command-palette-input")
             }
             Message::FocusChatArea => iced::widget::text_input::focus("chat-message-input"),
             Message::HandleEscape => {
-                if self.command_palette_active {
-                    self.command_palette_active = false;
+                if self.command_palette_ctx.active {
+                    self.command_palette_ctx.active = false;
+                    self.command_palette_ctx
+                        .update_current_from_query(String::new());
                     iced::Task::done(Message::FocusChatArea)
                 } else {
                     iced::Task::none()
@@ -337,38 +337,51 @@ impl StreamChat {
             iced::widget::vertical_space().height(200),
             row![
                 iced::widget::horizontal_space(),
-                iced::widget::text_input("Command Palette", self.command_palette_search.as_str())
-                    .on_input(Message::CommandPaletteSearchChanged)
-                    .id("command-palette-input")
-                    .width(command_palette_width)
-                    .padding([10, 10])
-                    .size(14)
-                    .style(|theme, status| {
-                        let mut style = iced::widget::text_input::default(theme, status);
-                        style.border.radius.top_right = 5.0; // = iced::border::radius(5.0);
-                        style.border.radius.top_left = 5.0;
-                        style.border.radius.bottom_right = 0.0;
-                        style.border.radius.bottom_left = 0.0;
-                        style
-                    }),
+                iced::widget::text_input(
+                    "Command Palette",
+                    self.command_palette_ctx.query.as_str()
+                )
+                .on_input(Message::CommandPaletteSearchChanged)
+                .id("command-palette-input")
+                .width(command_palette_width)
+                .padding([10, 10])
+                .size(14)
+                .style(if self.command_palette_ctx.current.is_empty() {
+                    AppStyle::command_palette_text_input_no_results
+                } else {
+                    AppStyle::command_palette_text_input_with_results
+                }),
                 iced::widget::horizontal_space(),
             ],
             row![
                 iced::widget::horizontal_space(),
-                iced::widget::container(iced::widget::text("Show results here..."))
+                iced::widget::container(self.command_palette_results_view())
                     .width(command_palette_width)
-                    .padding(20)
                     .style(|_theme| { iced::widget::container::background(color!(0xffffff)) }),
                 iced::widget::horizontal_space(),
             ],
         ];
         iced::widget::stack![base_ui]
-            .push_maybe(if self.command_palette_active {
+            .push_maybe(if self.command_palette_ctx.active {
                 Some(command_palette_layer)
             } else {
                 None
             })
             .into()
+    }
+
+    fn command_palette_results_view(&self) -> iced::Element<Message> {
+        let mut results = column![];
+        // TODO: visibility (1) -- bold/highlight the parts of the option that match the query.
+        // TODO: visibility (2) -- highlight the background of the current selected option.
+        for option in &self.command_palette_ctx.current {
+            let entry = iced::widget::container(
+                iced::widget::text(option).size(14).color(color!(0x3d691f)),
+            )
+            .padding([5, 10]);
+            results = results.push(entry);
+        }
+        results.into()
     }
 }
 
@@ -380,6 +393,67 @@ impl AppStyle {
 
     fn unhighlighted_comment(theme: &iced::widget::Theme) -> iced::widget::container::Style {
         iced::widget::container::transparent(theme)
+    }
+
+    fn command_palette_text_input_with_results(
+        theme: &iced::widget::Theme,
+        status: iced::widget::text_input::Status,
+    ) -> iced::widget::text_input::Style {
+        let mut style = iced::widget::text_input::default(theme, status);
+        style.border.radius.top_right = 5.0;
+        style.border.radius.top_left = 5.0;
+        style.border.radius.bottom_right = 0.0;
+        style.border.radius.bottom_left = 0.0;
+        style
+    }
+
+    fn command_palette_text_input_no_results(
+        theme: &iced::widget::Theme,
+        status: iced::widget::text_input::Status,
+    ) -> iced::widget::text_input::Style {
+        let mut style = iced::widget::text_input::default(theme, status);
+        style.border.radius.top_right = 5.0;
+        style.border.radius.top_left = 5.0;
+        style.border.radius.bottom_right = 5.0;
+        style.border.radius.bottom_left = 5.0;
+        style
+    }
+}
+
+struct CommandPalette {
+    actions: std::collections::HashMap<String, String>,
+    // The current relevant actions based on the user's query.
+    current: Vec<String>,
+    query: String,
+    // If true, the command palette is in focus and being used.
+    active: bool,
+}
+
+impl CommandPalette {
+    fn new() -> Self {
+        Self {
+            actions: std::collections::HashMap::from([
+                // Quit the application...
+                (String::from("quit"), String::from("")),
+            ]),
+            current: vec![],
+            query: String::new(),
+            active: false,
+        }
+    }
+
+    fn update_current_from_query(&mut self, query: String) {
+        let mut current_actions = vec![];
+        let query = query.trim();
+        if !query.is_empty() {
+            for (k, _) in &self.actions {
+                if k.starts_with(query) {
+                    current_actions.push(k.clone());
+                }
+            }
+        }
+        self.current = current_actions;
+        self.query = String::from(query);
     }
 }
 
