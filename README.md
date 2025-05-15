@@ -1,4 +1,5 @@
-`cargo run -- file://data/chat1.txt`
+- Running against a csv file: `cargo run -- file://data/chat1.txt`
+- Running against a twitch stream: `cargo run -- twitch://<twitch_username>` i.e. `cargo run -- twitch://northernlion`
 
 ## Twitch Config
 To configure twitch:

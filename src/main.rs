@@ -277,7 +277,7 @@ impl Clone for TwitchMessageStream {
 
 impl TwitchMessageStream {
     async fn new_for_stream(stream: &str) -> Self {
-        let stream_rx = match setup_twitch_oauth().await {
+        let stream_rx = match setup_twitch_oauth(stream).await {
             Err(twitch_auth_err) => {
                 eprintln!("error: {}", twitch_auth_err);
                 None
@@ -352,8 +352,9 @@ struct TwitchAuthPayload {
 // - Acquires the user's access and refresh token that will be
 //   used for interacting with the Twitch API.
 // - Stores the token information into the appdata storage.
-async fn setup_twitch_oauth()
--> Result<Option<tokio::sync::mpsc::Receiver<UserMessage>>, reqwest::Error> {
+async fn setup_twitch_oauth(
+    stream_name: &str,
+) -> Result<Option<tokio::sync::mpsc::Receiver<UserMessage>>, reqwest::Error> {
     let home_path = std::env::var("HOME").unwrap();
     let appdata_path = format!("{}/.streamchat", home_path);
     if !std::path::Path::new(appdata_path.as_str()).exists() {
@@ -408,6 +409,7 @@ async fn setup_twitch_oauth()
     // Subscribe to the EventSub for receiving chat messages.
     println!("Attempting to subscribe to twitch chat event sub.");
     match auth_twitch_chat_event_sub(
+        stream_name,
         api_config.twitch_api_client_id.as_str(),
         app_config.twitch_auth.unwrap().access_token.as_str(),
     )
@@ -429,6 +431,7 @@ async fn setup_twitch_oauth()
 }
 
 async fn auth_twitch_chat_event_sub(
+    stream_name: &str,
     client_id: &str,
     access_token: &str,
 ) -> Result<Option<tokio::sync::mpsc::Receiver<UserMessage>>, reqwest::Error> {
@@ -486,8 +489,13 @@ async fn auth_twitch_chat_event_sub(
     assert!(session_id.is_some());
 
     println!("Attempting to subscribe to chat event sub using this websocket session...");
-    match auth_twitch_chat_event_sub_init(session_id.unwrap().as_str(), client_id, access_token)
-        .await
+    match auth_twitch_chat_event_sub_init(
+        stream_name,
+        session_id.unwrap().as_str(),
+        client_id,
+        access_token,
+    )
+    .await
     {
         Ok(success) => {
             println!("Subscribed to eventsub={}", success);
@@ -561,12 +569,78 @@ async fn auth_twitch_chat_event_sub(
     Ok(Some(rx))
 }
 
+async fn twitch_get_user_id_from_name(
+    user_name: &str,
+    client_id: &str,
+    access_token: &str,
+) -> Result<Option<String>, reqwest::Error> {
+    let client = reqwest::Client::new();
+
+    let bearer_str = format!("Bearer {}", access_token);
+
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        "Authorization",
+        reqwest::header::HeaderValue::from_str(bearer_str.as_str()).unwrap(),
+    );
+    headers.insert(
+        "Client-Id",
+        reqwest::header::HeaderValue::from_str(client_id).unwrap(),
+    );
+    headers.insert(
+        "Content-Type",
+        reqwest::header::HeaderValue::from_static("application/json"),
+    );
+
+    let response = client
+        .get(format!(
+            "https://api.twitch.tv/helix/users?login={}",
+            user_name
+        ))
+        .headers(headers)
+        .send()
+        .await?;
+
+    if response.status() != reqwest::StatusCode::OK {
+        Ok(None)
+    } else {
+        #[derive(Deserialize)]
+        struct InlineTwitchUserIdPayload {
+            id: String,
+        }
+        #[derive(Deserialize)]
+        struct InlineTwitchUserIdDataPayload {
+            data: Vec<InlineTwitchUserIdPayload>,
+        }
+
+        let data = response.text().await.unwrap();
+        println!("user_id_data={}", data);
+        let res: InlineTwitchUserIdDataPayload =
+            serde_json::from_str(data.as_str()).expect("Failed to parse twitch user id payload.");
+
+        if res.data.len() == 0 {
+            eprintln!("No user id found in payload...");
+            Ok(None)
+        } else {
+            Ok(Some(res.data[0].id.clone()))
+        }
+    }
+}
+
 // Subscribe to the twitch event sub using the provided `websocket_session_id`.
 async fn auth_twitch_chat_event_sub_init(
+    stream_name: &str,
     websocket_session_id: &str,
     client_id: &str,
     access_token: &str,
 ) -> Result<bool, reqwest::Error> {
+    let streamer_id = twitch_get_user_id_from_name(stream_name, client_id, access_token).await?;
+    if let None = streamer_id {
+        eprintln!("Invalid twitch user: {}", stream_name);
+        return Ok(false);
+    }
+    let streamer_id = streamer_id.unwrap();
+
     let client = reqwest::Client::new();
 
     let bearer_str = format!("Bearer {}", access_token);
@@ -610,7 +684,7 @@ async fn auth_twitch_chat_event_sub_init(
         reqtype: String::from("channel.chat.message"),
         version: String::from("1"),
         condition: InlineEventSubCondition {
-            broadcaster_user_id: String::from("88946548" /* aceu */),
+            broadcaster_user_id: String::from(streamer_id),
             // TODO: Do not hardcode the user IDs into the request...
             user_id: String::from("76000742" /* infallible_mob_ */),
         },
