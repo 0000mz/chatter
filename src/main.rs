@@ -18,11 +18,18 @@ fn main() -> iced::Result {
 
 #[derive(Clone)]
 enum Message {
+    InitializeApp,
+    UpdateAppConfig(Option<(ApiConfig, AppConfig)>),
     InitializeChatError(String),
     MessagePost(Vec<UserMessage>),
     // If bool is true, then the stream has been initialized in the
     // subscription successfully.
     MessageStreamInitState(bool),
+    InputMessageChanged(String),
+    SaveBroadcasterId(String),
+    SaveUserId(String),
+    SendInputMessage,
+    Nothing(()),
     Terminate,
 }
 
@@ -36,24 +43,50 @@ struct StreamChat {
     // If true, the message stream has already spawned a subscription
     // that will feed messages to the ui.
     subscribed_to_message_stream: bool,
-    // stream: Option<Arc<dyn MessageStream>>,
     active_messages: VecDeque<UserMessage>,
+    input_message: String,
+    api_config: Option<ApiConfig>,
+    app_config: Option<AppConfig>,
+    broadcaster_id: Option<String>,
+    user_id: Option<String>,
 }
 
 impl StreamChat {
     fn boot() -> (Self, iced::Task<Message>) {
-        (StreamChat::new(), iced::Task::none())
+        (StreamChat::new(), iced::Task::done(Message::InitializeApp))
     }
 
     fn new() -> Self {
         StreamChat {
             subscribed_to_message_stream: false,
             active_messages: VecDeque::new(),
+            input_message: String::new(),
+            api_config: None,
+            app_config: None,
+            broadcaster_id: None,
+            user_id: None,
         }
     }
 
     fn update(&mut self, message: Message) -> iced::Task<Message> {
         match message {
+            Message::InitializeApp => iced::Task::perform(
+                (|| async move {
+                    let res = AppData::setup().await.unwrap();
+                    res
+                })(),
+                Message::UpdateAppConfig,
+            ),
+            Message::UpdateAppConfig(config) => match config {
+                None => iced::Task::done(Message::InitializeChatError(String::from(
+                    "Failed to initialize config.",
+                ))),
+                Some((api_config, app_config)) => {
+                    self.api_config = Some(api_config);
+                    self.app_config = Some(app_config);
+                    iced::Task::none()
+                }
+            },
             Message::InitializeChatError(error_message) => {
                 // TODO: display the error in some modal.
                 eprintln!("Erorr: {}", error_message);
@@ -81,11 +114,71 @@ impl StreamChat {
                     iced::Task::none()
                 }
             }),
+            Message::InputMessageChanged(message) => {
+                self.input_message = message;
+                iced::Task::none()
+            }
+            Message::SendInputMessage => {
+                let message = self.input_message.trim();
+                if message.len() == 0 {
+                    iced::Task::none()
+                } else {
+                    let message = String::from(message);
+                    self.input_message = String::new();
+                    // TODO: Probably don't need to clone this for every message sent.
+                    let api_config = self.api_config.as_ref().unwrap().clone();
+                    let app_config = self.app_config.as_ref().unwrap().clone();
+
+                    if let (Some(broadcaster_id), Some(user_id)) =
+                        (self.broadcaster_id.as_ref(), self.user_id.as_ref())
+                    {
+                        let broadcaster_id = broadcaster_id.clone();
+                        let user_id = user_id.clone();
+                        iced::Task::perform(
+                            (|| async move {
+                                twitch_send_message(
+                                    broadcaster_id.clone(),
+                                    user_id.clone(),
+                                    api_config,
+                                    app_config,
+                                    message,
+                                )
+                                .await;
+                            })(),
+                            Message::Nothing,
+                        )
+                    } else {
+                        eprintln!("Not sending message.. no broadcaster/user id found in state...");
+                        iced::Task::none()
+                    }
+                }
+            }
+            Message::SaveUserId(user_id) => {
+                self.user_id = Some(user_id);
+                iced::Task::none()
+            }
+            Message::SaveBroadcasterId(broadcaster_id) => {
+                self.broadcaster_id = Some(broadcaster_id);
+                iced::Task::none()
+            }
+            Message::Nothing(_) => iced::Task::none(),
         }
     }
 
     fn subscription(&self) -> iced::Subscription<Message> {
-        iced::Subscription::run(message_stream_sub)
+        if let (Some(_), Some(_)) = (&self.api_config, &self.app_config) {
+            let keypress_sub = iced::keyboard::on_key_press(|key, _mods| {
+                if let iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter) = key {
+                    Some(Message::SendInputMessage)
+                } else {
+                    None
+                }
+            });
+            let message_stream_sub = iced::Subscription::run(message_stream_sub);
+            iced::Subscription::batch([keypress_sub, message_stream_sub])
+        } else {
+            iced::Subscription::none()
+        }
     }
 
     fn view(&self) -> iced::Element<Message> {
@@ -107,10 +200,15 @@ impl StreamChat {
             );
         }
 
-        iced::widget::scrollable(v)
-            .width(iced::Fill)
-            .anchor_bottom()
-            .into()
+        column![
+            iced::widget::scrollable(v)
+                .width(iced::Fill)
+                .height(iced::Fill)
+                .anchor_bottom(),
+            iced::widget::text_input("Send chat message...", self.input_message.as_str())
+                .on_input(Message::InputMessageChanged),
+        ]
+        .into()
     }
 }
 
@@ -149,6 +247,13 @@ fn message_stream_sub() -> impl iced::task::Sipper<iced::task::Never, Message> {
             if let Err(e) = stream {
                 output.send(Message::InitializeChatError(e)).await;
             } else if let Ok(mut stream) = stream {
+                if let Some((broadcaster_id, user_id)) = stream.get_broadcaster_and_user_id() {
+                    output
+                        .send(Message::SaveBroadcasterId(broadcaster_id))
+                        .await;
+                    output.send(Message::SaveUserId(user_id)).await;
+                }
+
                 output.send(Message::MessageStreamInitState(true)).await;
                 loop {
                     let user_messages = stream.collect_messages().await;
@@ -176,18 +281,11 @@ impl<T: 'static> AToAny for T {
 #[async_trait]
 trait MessageStream: AToAny + Send + Sync {
     async fn collect_messages(&mut self) -> Vec<UserMessage>;
+    fn get_broadcaster_and_user_id(&self) -> Option<(String, String)>;
 }
 
 struct CsvMessageStream {
     messages: VecDeque<UserMessage>,
-}
-
-impl Clone for CsvMessageStream {
-    fn clone(&self) -> Self {
-        CsvMessageStream {
-            messages: self.messages.clone(),
-        }
-    }
 }
 
 impl CsvMessageStream {
@@ -226,6 +324,10 @@ impl CsvMessageStream {
 
 #[async_trait]
 impl MessageStream for CsvMessageStream {
+    fn get_broadcaster_and_user_id(&self) -> Option<(String, String)> {
+        None
+    }
+
     async fn collect_messages(&mut self) -> Vec<UserMessage> {
         let mut released_messages = vec![];
         let mut itr = self.messages.iter();
@@ -258,6 +360,8 @@ impl MessageStream for CsvMessageStream {
 struct TwitchMessageStream {
     stream_name: String,
     message_stream_received: Option<tokio::sync::mpsc::Receiver<UserMessage>>,
+    user_id: String,
+    broadcaster_id: String,
 }
 
 impl std::fmt::Debug for TwitchMessageStream {
@@ -266,21 +370,24 @@ impl std::fmt::Debug for TwitchMessageStream {
     }
 }
 
-impl Clone for TwitchMessageStream {
-    fn clone(&self) -> Self {
-        if self.message_stream_received.is_some() {
-            eprintln!("TwitchMessageStream cloned, message_stream_receiver not preserved.");
-        }
-        TwitchMessageStream {
-            stream_name: self.stream_name.clone(),
-            message_stream_received: None,
-        }
-    }
-}
-
 impl TwitchMessageStream {
     async fn new_for_stream(stream: &str) -> Self {
-        let stream_rx = match setup_twitch_oauth(stream).await {
+        let (api_config, app_config) = AppData::get_configs().await;
+        let (broadcaster_id, user_id) =
+            Self::fetch_broadcaster_and_user_id(&api_config, &app_config, stream)
+                .await
+                .unwrap();
+
+        println!("Twitch:Broadcaster ID: {}", broadcaster_id);
+        println!("Twitch:User ID: {}", user_id);
+        let stream_rx = match setup_twitch_oauth(
+            &api_config,
+            &app_config,
+            broadcaster_id.as_str(),
+            user_id.as_str(),
+        )
+        .await
+        {
             Err(twitch_auth_err) => {
                 eprintln!("error: {}", twitch_auth_err);
                 None
@@ -293,12 +400,51 @@ impl TwitchMessageStream {
         TwitchMessageStream {
             stream_name: String::from(stream),
             message_stream_received: stream_rx,
+            user_id,
+            broadcaster_id,
         }
+    }
+
+    async fn fetch_broadcaster_and_user_id(
+        api_config: &ApiConfig,
+        app_config: &AppConfig,
+        stream_name: &str,
+    ) -> Option<(String, String)> {
+        let access_token = app_config
+            .twitch_auth
+            .as_ref()
+            .unwrap()
+            .access_token
+            .as_str();
+        let client_id = api_config.twitch_api_client_id.as_str();
+
+        let streamer_id = twitch_get_user_id_from_name(Some(stream_name), client_id, access_token)
+            .await
+            .expect("Failed to get streamer id...");
+        if let None = streamer_id {
+            eprintln!("Invalid twitch user: {}", stream_name);
+            return None;
+        }
+        let streamer_id = streamer_id.unwrap();
+        let user_id = twitch_get_user_id_from_name(None, client_id, access_token)
+            .await
+            .expect("Failed to get user id.");
+        if let None = user_id {
+            eprintln!("Failed to get user id for current authenticated user.");
+            return None;
+        }
+        let user_id = user_id.unwrap();
+
+        Some((streamer_id, user_id))
     }
 }
 
 #[async_trait]
 impl MessageStream for TwitchMessageStream {
+    fn get_broadcaster_and_user_id(&self) -> Option<(String, String)> {
+        Some((self.broadcaster_id.clone(), self.user_id.clone()))
+    }
+
     async fn collect_messages(&mut self) -> Vec<UserMessage> {
         match self.message_stream_received.as_mut() {
             None => Vec::new(),
@@ -332,18 +478,18 @@ impl UserMessage {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct AppConfig {
     twitch_auth: Option<TwitchAuthPayload>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct ApiConfig {
     twitch_api_client_id: String,
     twitch_api_secret: String,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 struct TwitchAuthPayload {
     access_token: String,
     refresh_token: String,
@@ -351,70 +497,107 @@ struct TwitchAuthPayload {
     expiration_timestamp: std::time::Instant,
 }
 
-// Setup the twitch user authentication.
-// - Acquires the user's access and refresh token that will be
-//   used for interacting with the Twitch API.
-// - Stores the token information into the appdata storage.
-async fn setup_twitch_oauth(
-    stream_name: &str,
-) -> Result<Option<tokio::sync::mpsc::Receiver<UserMessage>>, reqwest::Error> {
-    let home_path = std::env::var("HOME").unwrap();
-    let appdata_path = format!("{}/.streamchat", home_path);
-    if !std::path::Path::new(appdata_path.as_str()).exists() {
-        println!("Creating appdata directory: {}", appdata_path);
-        std::fs::create_dir(&appdata_path).unwrap();
+struct AppData;
+impl AppData {
+    fn get_directory() -> String {
+        let home_path = std::env::var("HOME").unwrap();
+        format!("{}/.streamchat", home_path)
     }
 
-    let api_config_path = format!("{}/api.toml", appdata_path);
-    if !std::path::Path::new(api_config_path.as_str()).exists() {
-        // TODO: Give better instructions as to how the `api.toml` file should be structured.
-        eprintln!(
-            "No api config file found. Create it and store the twitch client id/secret there: {}",
-            api_config_path,
-        );
-        return Ok(None);
+    fn get_api_config_filepath() -> String {
+        format!("{}/api.toml", Self::get_directory())
     }
 
-    let api_config_contents = std::fs::read_to_string(&api_config_path).unwrap();
-    let api_config: ApiConfig = toml::from_str(api_config_contents.as_str()).unwrap();
-
-    let config_path = format!("{}/config.toml", appdata_path);
-    if !std::path::Path::new(config_path.as_str()).exists() {
-        println!("Creating config file...");
-        std::fs::File::create(config_path.as_str()).unwrap();
+    fn get_app_config_filepath() -> String {
+        format!("{}/config.toml", Self::get_directory())
     }
 
-    let config_contents = std::fs::read_to_string(&config_path).unwrap();
-    let mut app_config: AppConfig = toml::from_str(config_contents.as_str()).unwrap();
+    async fn get_configs() -> (ApiConfig, AppConfig) {
+        let config_path = AppData::get_app_config_filepath();
+        let config_contents = std::fs::read_to_string(&config_path).unwrap();
+        let app_config: AppConfig = toml::from_str(config_contents.as_str()).unwrap();
 
-    // TODO: Also check if the token has expired...
-    if let None = app_config.twitch_auth {
-        println!("No twitch user access token in app config; regenerating...");
-        match auth_twitch_new_access_token(
-            api_config.twitch_api_client_id.as_str(),
-            api_config.twitch_api_secret.as_str(),
-        )
-        .await?
-        {
-            Some(twitch_auth_info) => {
-                app_config.twitch_auth = Some(twitch_auth_info);
-            }
-            None => {}
+        let api_config_path = AppData::get_api_config_filepath();
+        let api_config_contents = std::fs::read_to_string(&api_config_path).unwrap();
+        let api_config: ApiConfig = toml::from_str(api_config_contents.as_str()).unwrap();
+
+        (api_config, app_config)
+    }
+
+    async fn setup() -> Result<Option<(ApiConfig, AppConfig)>, reqwest::Error> {
+        let appdata_path = AppData::get_directory();
+        if !std::path::Path::new(appdata_path.as_str()).exists() {
+            println!("Creating appdata directory: {}", appdata_path);
+            std::fs::create_dir(&appdata_path).unwrap();
         }
-    } else {
-        println!("Using cached twitch user access token.");
+
+        let api_config_path = AppData::get_api_config_filepath();
+        if !std::path::Path::new(api_config_path.as_str()).exists() {
+            // TODO: Give better instructions as to how the `api.toml` file should be structured.
+            eprintln!(
+                "No api config file found. Create it and store the twitch client id/secret there: {}",
+                api_config_path,
+            );
+            return Ok(None);
+        }
+
+        let api_config_contents = std::fs::read_to_string(&api_config_path).unwrap();
+        let api_config: ApiConfig = toml::from_str(api_config_contents.as_str()).unwrap();
+
+        let config_path = AppData::get_app_config_filepath();
+        if !std::path::Path::new(config_path.as_str()).exists() {
+            println!("Creating config file...");
+            std::fs::File::create(config_path.as_str()).unwrap();
+        }
+
+        let config_contents = std::fs::read_to_string(&config_path).unwrap();
+        let mut app_config: AppConfig = toml::from_str(config_contents.as_str()).unwrap();
+
+        // TODO: Also check if the token has expired...
+        if let None = app_config.twitch_auth {
+            println!("No twitch user access token in app config; regenerating...");
+            match auth_twitch_new_access_token(
+                api_config.twitch_api_client_id.as_str(),
+                api_config.twitch_api_secret.as_str(),
+            )
+            .await?
+            {
+                Some(twitch_auth_info) => {
+                    app_config.twitch_auth = Some(twitch_auth_info);
+                }
+                None => {}
+            }
+        } else {
+            println!("Using cached twitch user access token.");
+        }
+
+        println!("Updating app config.");
+        let updated_app_config_str = toml::to_string(&app_config).unwrap();
+        std::fs::write(config_path, updated_app_config_str).unwrap();
+
+        Ok(Some(AppData::get_configs().await))
     }
+}
 
-    println!("Updating app config.");
-    let updated_app_config_str = toml::to_string(&app_config).unwrap();
-    std::fs::write(config_path, updated_app_config_str).unwrap();
-
+// Setup the twitch user authentication.
+async fn setup_twitch_oauth(
+    api_config: &ApiConfig,
+    app_config: &AppConfig,
+    broadcaster_id: &str,
+    user_id: &str,
+) -> Result<Option<tokio::sync::mpsc::Receiver<UserMessage>>, reqwest::Error> {
     // Subscribe to the EventSub for receiving chat messages.
     println!("Attempting to subscribe to twitch chat event sub.");
     match auth_twitch_chat_event_sub(
-        stream_name,
+        broadcaster_id,
+        user_id,
         api_config.twitch_api_client_id.as_str(),
-        app_config.twitch_auth.unwrap().access_token.as_str(),
+        app_config
+            .twitch_auth
+            .as_ref()
+            .unwrap()
+            .access_token
+            .as_str(),
     )
     .await
     {
@@ -434,7 +617,8 @@ async fn setup_twitch_oauth(
 }
 
 async fn auth_twitch_chat_event_sub(
-    stream_name: &str,
+    broadcaster_id: &str,
+    user_id: &str,
     client_id: &str,
     access_token: &str,
 ) -> Result<Option<tokio::sync::mpsc::Receiver<UserMessage>>, reqwest::Error> {
@@ -493,7 +677,8 @@ async fn auth_twitch_chat_event_sub(
 
     println!("Attempting to subscribe to chat event sub using this websocket session...");
     match auth_twitch_chat_event_sub_init(
-        stream_name,
+        broadcaster_id,
+        user_id,
         session_id.unwrap().as_str(),
         client_id,
         access_token,
@@ -631,25 +816,12 @@ async fn twitch_get_user_id_from_name(
 
 // Subscribe to the twitch event sub using the provided `websocket_session_id`.
 async fn auth_twitch_chat_event_sub_init(
-    stream_name: &str,
+    broadcaster_id: &str,
+    user_id: &str,
     websocket_session_id: &str,
     client_id: &str,
     access_token: &str,
 ) -> Result<bool, reqwest::Error> {
-    let streamer_id =
-        twitch_get_user_id_from_name(Some(stream_name), client_id, access_token).await?;
-    if let None = streamer_id {
-        eprintln!("Invalid twitch user: {}", stream_name);
-        return Ok(false);
-    }
-    let streamer_id = streamer_id.unwrap();
-    let user_id = twitch_get_user_id_from_name(None, client_id, access_token).await?;
-    if let None = user_id {
-        eprintln!("Failed to get user id for current authenticated user.");
-        return Ok(false);
-    }
-    let user_id = user_id.unwrap();
-
     let client = reqwest::Client::new();
     let bearer_str = format!("Bearer {}", access_token);
     let mut headers = reqwest::header::HeaderMap::new();
@@ -691,7 +863,7 @@ async fn auth_twitch_chat_event_sub_init(
         reqtype: String::from("channel.chat.message"),
         version: String::from("1"),
         condition: InlineEventSubCondition {
-            broadcaster_user_id: String::from(streamer_id),
+            broadcaster_user_id: String::from(broadcaster_id),
             user_id: String::from(user_id),
         },
         transport: InlineTransport {
@@ -885,4 +1057,54 @@ async fn auth_twitch_new_access_token(
     };
     println!("RESULT={:?}", full_twitch_user_payload);
     Ok(Some(full_twitch_user_payload))
+}
+
+async fn twitch_send_message(
+    broadcaster_id: String,
+    user_id: String,
+    api_config: ApiConfig,
+    app_config: AppConfig,
+    message: String,
+) {
+    let access_token = app_config.twitch_auth.unwrap().access_token;
+    let client_id = api_config.twitch_api_client_id;
+
+    let client = reqwest::Client::new();
+    let bearer_str = format!("Bearer {}", access_token);
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        "Authorization",
+        reqwest::header::HeaderValue::from_str(bearer_str.as_str()).unwrap(),
+    );
+    headers.insert(
+        "Client-Id",
+        reqwest::header::HeaderValue::from_str(client_id.as_str()).unwrap(),
+    );
+    headers.insert(
+        "Content-Type",
+        reqwest::header::HeaderValue::from_static("application/json"),
+    );
+
+    #[derive(Serialize)]
+    struct TwitchMessageSendBody {
+        broadcaster_id: String,
+        sender_id: String,
+        message: String,
+    }
+
+    let body = TwitchMessageSendBody {
+        broadcaster_id,
+        sender_id: user_id,
+        message,
+    };
+
+    let res = client
+        .post("https://api.twitch.tv/helix/chat/messages")
+        .headers(headers)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    println!("Message send status={}", res.status());
+    ()
 }
