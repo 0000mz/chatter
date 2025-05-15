@@ -13,6 +13,7 @@ fn main() -> iced::Result {
     }
     iced::application(StreamChat::boot, StreamChat::update, StreamChat::view)
         .subscription(StreamChat::subscription)
+        .title(StreamChat::title)
         .style(StreamChat::style)
         .run()
 }
@@ -27,7 +28,7 @@ enum Message {
     // subscription successfully.
     MessageStreamInitState(bool),
     InputMessageChanged(String),
-    SaveBroadcasterId(String),
+    SaveBroadcasterInfo((String, String)),
     SaveUserId(String),
     SendInputMessage,
     Nothing(()),
@@ -49,6 +50,7 @@ struct StreamChat {
     api_config: Option<ApiConfig>,
     app_config: Option<AppConfig>,
     broadcaster_id: Option<String>,
+    broadcaster_name: Option<String>,
     user_id: Option<String>,
 }
 
@@ -65,6 +67,7 @@ impl StreamChat {
             api_config: None,
             app_config: None,
             broadcaster_id: None,
+            broadcaster_name: None,
             user_id: None,
         }
     }
@@ -73,6 +76,14 @@ impl StreamChat {
         iced::theme::Style {
             background_color: iced::color!(0x000000),
             text_color: iced::color!(0xffffff),
+        }
+    }
+
+    fn title(&self) -> String {
+        if let Some(broadcaster_name) = self.broadcaster_name.as_ref() {
+            format!("StreamChat - [{}]", broadcaster_name)
+        } else {
+            String::from("StreamChat - [unnamed]")
         }
     }
 
@@ -165,8 +176,9 @@ impl StreamChat {
                 self.user_id = Some(user_id);
                 iced::Task::none()
             }
-            Message::SaveBroadcasterId(broadcaster_id) => {
+            Message::SaveBroadcasterInfo((broadcaster_id, broadcaster_name)) => {
                 self.broadcaster_id = Some(broadcaster_id);
+                self.broadcaster_name = Some(broadcaster_name);
                 iced::Task::none()
             }
             Message::Nothing(_) => iced::Task::none(),
@@ -267,9 +279,14 @@ fn message_stream_sub() -> impl iced::task::Sipper<iced::task::Never, Message> {
             if let Err(e) = stream {
                 output.send(Message::InitializeChatError(e)).await;
             } else if let Ok(mut stream) = stream {
-                if let Some((broadcaster_id, user_id)) = stream.get_broadcaster_and_user_id() {
+                if let Some((broadcaster_id, broadcaster_name, user_id)) =
+                    stream.get_broadcaster_and_user_id()
+                {
                     output
-                        .send(Message::SaveBroadcasterId(broadcaster_id))
+                        .send(Message::SaveBroadcasterInfo((
+                            broadcaster_id,
+                            broadcaster_name,
+                        )))
                         .await;
                     output.send(Message::SaveUserId(user_id)).await;
                 }
@@ -301,7 +318,7 @@ impl<T: 'static> AToAny for T {
 #[async_trait]
 trait MessageStream: AToAny + Send + Sync {
     async fn collect_messages(&mut self) -> Vec<UserMessage>;
-    fn get_broadcaster_and_user_id(&self) -> Option<(String, String)>;
+    fn get_broadcaster_and_user_id(&self) -> Option<(String, String, String)>;
 }
 
 struct CsvMessageStream {
@@ -345,7 +362,7 @@ impl CsvMessageStream {
 
 #[async_trait]
 impl MessageStream for CsvMessageStream {
-    fn get_broadcaster_and_user_id(&self) -> Option<(String, String)> {
+    fn get_broadcaster_and_user_id(&self) -> Option<(String, String, String)> {
         None
     }
 
@@ -462,8 +479,12 @@ impl TwitchMessageStream {
 
 #[async_trait]
 impl MessageStream for TwitchMessageStream {
-    fn get_broadcaster_and_user_id(&self) -> Option<(String, String)> {
-        Some((self.broadcaster_id.clone(), self.user_id.clone()))
+    fn get_broadcaster_and_user_id(&self) -> Option<(String, String, String)> {
+        Some((
+            self.broadcaster_id.clone(),
+            self.stream_name.clone(),
+            self.user_id.clone(),
+        ))
     }
 
     async fn collect_messages(&mut self) -> Vec<UserMessage> {
