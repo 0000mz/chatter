@@ -32,6 +32,16 @@ enum Message {
     SaveBroadcasterInfo((String, String)),
     SaveUserId(String),
     SendInputMessage,
+    // If true, the command palette will be set to active.
+    // Otherwise, it will be set to inactive.
+    ToggleCommandPalette(bool),
+    // Received when the ESC key is pressed. What should happen depends
+    // entirely on the current state of the application.
+    // i.e. if the current focus is the command palette, then exit it.
+    HandleEscape,
+    // If this message is received, the focus should turn to the
+    // current open chat area.
+    FocusChatArea,
     Nothing(()),
     Terminate,
 }
@@ -94,13 +104,16 @@ impl StreamChat {
 
     fn update(&mut self, message: Message) -> iced::Task<Message> {
         match message {
-            Message::InitializeApp => iced::Task::perform(
-                (|| async move {
-                    let res = AppData::setup().await.unwrap();
-                    res
-                })(),
-                Message::UpdateAppConfig,
-            ),
+            Message::InitializeApp => iced::Task::batch([
+                iced::Task::perform(
+                    (|| async move {
+                        let res = AppData::setup().await.unwrap();
+                        res
+                    })(),
+                    Message::UpdateAppConfig,
+                ),
+                iced::Task::done(Message::FocusChatArea),
+            ]),
             Message::UpdateAppConfig(config) => match config {
                 None => iced::Task::done(Message::InitializeChatError(String::from(
                     "Failed to initialize config.",
@@ -188,19 +201,35 @@ impl StreamChat {
                 self.broadcaster_name = Some(broadcaster_name);
                 iced::Task::none()
             }
+            Message::ToggleCommandPalette(enabled) => {
+                self.command_palette_active = enabled;
+                iced::widget::text_input::focus("command-palette-input")
+            }
+            Message::FocusChatArea => iced::widget::text_input::focus("chat-message-input"),
+            Message::HandleEscape => {
+                if self.command_palette_active {
+                    self.command_palette_active = false;
+                    iced::Task::done(Message::FocusChatArea)
+                } else {
+                    iced::Task::none()
+                }
+            }
             Message::Nothing(_) => iced::Task::none(),
         }
     }
 
     fn subscription(&self) -> iced::Subscription<Message> {
         if let (Some(_), Some(_)) = (&self.api_config, &self.app_config) {
-            let keypress_sub = iced::keyboard::on_key_press(|key, _mods| {
-                if let iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter) = key {
-                    Some(Message::SendInputMessage)
-                } else {
-                    None
-                }
-            });
+            let keypress_sub =
+                iced::keyboard::on_key_release(|key, mods| match (key.as_ref(), mods) {
+                    (iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape), _) => {
+                        Some(Message::HandleEscape)
+                    }
+                    (iced::keyboard::Key::Character("p"), iced::keyboard::Modifiers::CTRL) => {
+                        Some(Message::ToggleCommandPalette(true))
+                    }
+                    _ => None,
+                });
             let message_stream_sub = iced::Subscription::run(message_stream_sub);
             iced::Subscription::batch([keypress_sub, message_stream_sub])
         } else {
@@ -268,6 +297,9 @@ impl StreamChat {
                 .anchor_bottom(),
             row![
                 iced::widget::text_input("Send chat message...", self.input_message.as_str())
+                    .id("chat-message-input")
+                    .on_input(Message::InputMessageChanged)
+                    .on_submit(Message::SendInputMessage)
                     .width(iced::Fill)
                     .padding([10, 20])
                     .style(|theme, status| {
@@ -278,8 +310,7 @@ impl StreamChat {
                         style.border.color = outline_color;
                         style.background = iced::Background::Color(color!(0x000000));
                         style
-                    })
-                    .on_input(Message::InputMessageChanged),
+                    }),
                 iced::widget::button("Send")
                     .on_press_maybe((|| {
                         if self.input_message.len() > 0 {
@@ -308,8 +339,10 @@ impl StreamChat {
                 iced::widget::horizontal_space(),
                 iced::widget::text_input("Command Palette", self.command_palette_search.as_str())
                     .on_input(Message::CommandPaletteSearchChanged)
+                    .id("command-palette-input")
                     .width(command_palette_width)
                     .padding([10, 10])
+                    .size(14)
                     .style(|theme, status| {
                         let mut style = iced::widget::text_input::default(theme, status);
                         style.border.radius.top_right = 5.0; // = iced::border::radius(5.0);
