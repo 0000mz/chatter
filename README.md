@@ -20,3 +20,6 @@ twitch_api_secret = "<....>"
 
 ## TODO
 - Create an initialization bootstrap to guide the setup of API information.
+- When user scrolls up in the chat, do not append new messages. This should prevent the chat moving away when
+  trying to read some previous message.
+- The text input should be multiline so that long messages are still visible.

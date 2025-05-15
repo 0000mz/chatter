@@ -229,15 +229,41 @@ impl StreamChat {
         }
 
         column![
-            iced::widget::scrollable(v)
+            iced::widget::scrollable(v.padding([0, 10 /* left/right */]))
                 .width(iced::Fill)
                 .height(iced::Fill)
                 .anchor_bottom(),
             row![
                 iced::widget::text_input("Send chat message...", self.input_message.as_str())
                     .width(iced::Fill)
+                    .padding([10, 20])
+                    .style(|theme, status| {
+                        // TODO: reused style -- Add this to some global theme.
+                        let outline_color = color!(0x4828ad);
+                        let mut style = iced::widget::text_input::default(theme, status);
+                        style.border.radius = iced::border::left(0.0);
+                        style.border.color = outline_color;
+                        style.background = iced::Background::Color(color!(0x000000));
+                        style
+                    })
                     .on_input(Message::InputMessageChanged),
-                iced::widget::button("Send").on_press(Message::SendInputMessage)
+                iced::widget::button("Send")
+                    .on_press_maybe((|| {
+                        if self.input_message.len() > 0 {
+                            Some(Message::SendInputMessage)
+                        } else {
+                            None
+                        }
+                    })())
+                    .style(|theme, status| {
+                        // TODO: reused style -- Add this to some global theme.
+                        let outline_color = color!(0x4828ad);
+                        let mut style = iced::widget::button::primary(theme, status);
+                        style.border.radius = iced::border::left(0.0);
+                        style.background = Some(iced::Background::Color(outline_color));
+                        style
+                    })
+                    .padding([10, 20])
             ]
         ]
         .into()
