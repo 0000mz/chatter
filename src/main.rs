@@ -205,31 +205,57 @@ impl StreamChat {
         let mut v = column![];
         for msg in &self.active_messages {
             v = v.push(
-                rich_text![
-                    span(format!("{}: ", &msg.username))
-                        .color(color!(0xff0000))
-                        .font(Font {
-                            weight: font::Weight::Bold,
-                            ..Font::default()
-                        }),
-                    span(&msg.message).color(
-                        if let Some(user_id) = self.user_id.as_ref()
-                            && msg.user_id.as_str() == user_id.as_str()
-                        {
-                            color!(0xff0000)
-                        } else {
-                            color!(0xffffff)
-                        }
-                    )
-                ]
-                // Filler to supress compiler.
-                .on_link_click(|_link: u32| Message::Terminate)
-                .size(14),
+                iced::widget::container(
+                    rich_text![
+                        span(format!("{}: ", &msg.username))
+                            .color(color!(0xff0000))
+                            .font(Font {
+                                weight: font::Weight::Bold,
+                                ..Font::default()
+                            }),
+                        span(&msg.message)
+                    ]
+                    // Filler to supress compiler.
+                    .on_link_click(|_link: u32| Message::Terminate)
+                    .size(14),
+                )
+                .style(
+                    if let Some(user_id) = self.user_id.as_ref()
+                        && msg.user_id.as_str() == user_id.as_str()
+                    {
+                        AppStyle::highlighted_comment
+                    } else {
+                        AppStyle::unhighlighted_comment
+                    },
+                )
+                .padding([0, 10])
+                .width(iced::Fill),
             );
         }
 
         column![
-            iced::widget::scrollable(v.padding([0, 10 /* left/right */]))
+            iced::widget::container(row![
+                iced::widget::container(iced::widget::text(
+                    if let Some(name) = self.broadcaster_name.as_ref() {
+                        name
+                    } else {
+                        "unnamed"
+                    }
+                ))
+                .style(|_theme| {
+                    // TODO: reused style -- Add this to some global theme.
+                    let outline_color = color!(0x4828ad);
+                    iced::widget::container::background(outline_color)
+                })
+                .padding([5, 10])
+            ])
+            .width(iced::Fill)
+            .style(|_theme| {
+                // TODO: reused style -- Add this to some global theme.
+                let outline_color = color!(0x2d1870);
+                iced::widget::container::background(outline_color)
+            }),
+            iced::widget::scrollable(v)
                 .width(iced::Fill)
                 .height(iced::Fill)
                 .anchor_bottom(),
@@ -267,6 +293,17 @@ impl StreamChat {
             ]
         ]
         .into()
+    }
+}
+
+struct AppStyle;
+impl AppStyle {
+    fn highlighted_comment(_theme: &iced::widget::Theme) -> iced::widget::container::Style {
+        iced::widget::container::background(color!(0xad3939, 0.2))
+    }
+
+    fn unhighlighted_comment(theme: &iced::widget::Theme) -> iced::widget::container::Style {
+        iced::widget::container::transparent(theme)
     }
 }
 
