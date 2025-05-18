@@ -31,6 +31,19 @@ enum Message {
     SaveBroadcasterInfo((String, String)),
     SaveUserId(String),
     SendInputMessage,
+    // If true, the command palette will be set to active.
+    // Otherwise, it will be set to inactive.
+    ToggleCommandPalette(bool),
+    CommandPaletteSearchChanged(String),
+    // Selects the currently selected command palette option.
+    CommandPaletteSelect,
+    // Received when the ESC key is pressed. What should happen depends
+    // entirely on the current state of the application.
+    // i.e. if the current focus is the command palette, then exit it.
+    HandleSpecialKey(iced::keyboard::key::Named),
+    // If this message is received, the focus should turn to the
+    // current open chat area.
+    FocusChatArea,
     Nothing(()),
     Terminate,
 }
@@ -52,6 +65,7 @@ struct StreamChat {
     broadcaster_id: Option<String>,
     broadcaster_name: Option<String>,
     user_id: Option<String>,
+    command_palette_ctx: CommandPalette,
 }
 
 impl StreamChat {
@@ -69,6 +83,7 @@ impl StreamChat {
             broadcaster_id: None,
             broadcaster_name: None,
             user_id: None,
+            command_palette_ctx: CommandPalette::new(),
         }
     }
 
@@ -89,13 +104,16 @@ impl StreamChat {
 
     fn update(&mut self, message: Message) -> iced::Task<Message> {
         match message {
-            Message::InitializeApp => iced::Task::perform(
-                (|| async move {
-                    let res = AppData::setup().await.unwrap();
-                    res
-                })(),
-                Message::UpdateAppConfig,
-            ),
+            Message::InitializeApp => iced::Task::batch([
+                iced::Task::perform(
+                    (|| async move {
+                        let res = AppData::setup().await.unwrap();
+                        res
+                    })(),
+                    Message::UpdateAppConfig,
+                ),
+                iced::Task::done(Message::FocusChatArea),
+            ]),
             Message::UpdateAppConfig(config) => match config {
                 None => iced::Task::done(Message::InitializeChatError(String::from(
                     "Failed to initialize config.",
@@ -135,6 +153,14 @@ impl StreamChat {
                 self.input_message = message;
                 iced::Task::none()
             }
+            Message::CommandPaletteSearchChanged(search) => {
+                self.command_palette_ctx.update_current_from_query(search);
+                iced::Task::none()
+            }
+            Message::CommandPaletteSelect => match self.command_palette_ctx.maybe_select() {
+                Some(msg) => iced::Task::done(msg),
+                None => iced::Task::none(),
+            },
             Message::SendInputMessage => {
                 let message = self.input_message.trim();
                 if message.len() == 0 {
@@ -179,19 +205,63 @@ impl StreamChat {
                 self.broadcaster_name = Some(broadcaster_name);
                 iced::Task::none()
             }
+            Message::ToggleCommandPalette(enabled) => {
+                self.command_palette_ctx.active = enabled;
+                iced::widget::text_input::focus("command-palette-input")
+            }
+            Message::FocusChatArea => iced::widget::text_input::focus("chat-message-input"),
+            Message::HandleSpecialKey(key) => match key {
+                iced::keyboard::key::Named::Escape => {
+                    if self.command_palette_ctx.active {
+                        self.command_palette_ctx.active = false;
+                        self.command_palette_ctx
+                            .update_current_from_query(String::new());
+                        iced::Task::done(Message::FocusChatArea)
+                    } else {
+                        iced::Task::none()
+                    }
+                }
+                arrow @ iced::keyboard::key::Named::ArrowUp
+                | arrow @ iced::keyboard::key::Named::ArrowDown
+                | arrow @ iced::keyboard::key::Named::Tab => {
+                    let delta = if arrow == iced::keyboard::key::Named::ArrowUp {
+                        -1
+                    } else {
+                        1
+                    };
+                    if self.command_palette_ctx.active {
+                        let mut next_index = self.command_palette_ctx.selected_index + delta;
+                        if next_index < -1 {
+                            next_index = -1;
+                        }
+                        if next_index >= self.command_palette_ctx.current.len() as i32 {
+                            next_index = self.command_palette_ctx.current.len() as i32 - 1;
+                        }
+                        self.command_palette_ctx.selected_index = next_index;
+                    }
+                    iced::Task::none()
+                }
+                _ => iced::Task::none(),
+            },
             Message::Nothing(_) => iced::Task::none(),
         }
     }
 
     fn subscription(&self) -> iced::Subscription<Message> {
         if let (Some(_), Some(_)) = (&self.api_config, &self.app_config) {
-            let keypress_sub = iced::keyboard::on_key_press(|key, _mods| {
-                if let iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter) = key {
-                    Some(Message::SendInputMessage)
-                } else {
-                    None
-                }
-            });
+            let keypress_sub =
+                iced::keyboard::on_key_release(|key, mods| match (key.as_ref(), mods) {
+                    (iced::keyboard::Key::Named(k @ iced::keyboard::key::Named::Escape), _)
+                    | (iced::keyboard::Key::Named(k @ iced::keyboard::key::Named::ArrowUp), _)
+                    | (iced::keyboard::Key::Named(k @ iced::keyboard::key::Named::ArrowDown), _)
+                    | (iced::keyboard::Key::Named(k @ iced::keyboard::key::Named::Tab), _) => {
+                        Some(Message::HandleSpecialKey(k))
+                    }
+                    (iced::keyboard::Key::Character("p"), iced::keyboard::Modifiers::CTRL) => {
+                        Some(Message::ToggleCommandPalette(true))
+                    }
+                    _ => None,
+                });
             let message_stream_sub = iced::Subscription::run(message_stream_sub);
             iced::Subscription::batch([keypress_sub, message_stream_sub])
         } else {
@@ -231,7 +301,7 @@ impl StreamChat {
             );
         }
 
-        column![
+        let base_ui = column![
             iced::widget::container(row![
                 iced::widget::container(iced::widget::text(
                     if let Some(name) = self.broadcaster_name.as_ref() {
@@ -259,6 +329,9 @@ impl StreamChat {
                 .anchor_bottom(),
             row![
                 iced::widget::text_input("Send chat message...", self.input_message.as_str())
+                    .id("chat-message-input")
+                    .on_input(Message::InputMessageChanged)
+                    .on_submit(Message::SendInputMessage)
                     .width(iced::Fill)
                     .padding([10, 20])
                     .style(|theme, status| {
@@ -269,8 +342,7 @@ impl StreamChat {
                         style.border.color = outline_color;
                         style.background = iced::Background::Color(color!(0x000000));
                         style
-                    })
-                    .on_input(Message::InputMessageChanged),
+                    }),
                 iced::widget::button("Send")
                     .on_press_maybe((|| {
                         if self.input_message.len() > 0 {
@@ -289,8 +361,64 @@ impl StreamChat {
                     })
                     .padding([10, 20])
             ]
-        ]
-        .into()
+        ];
+
+        // TODO: make the command palette width not larger than the window's width.
+        let command_palette_width = 600;
+        let command_palette_layer = column![
+            iced::widget::vertical_space().height(200),
+            row![
+                iced::widget::horizontal_space(),
+                iced::widget::text_input(
+                    "Command Palette",
+                    self.command_palette_ctx.query.as_str()
+                )
+                .on_input(Message::CommandPaletteSearchChanged)
+                .on_submit(Message::CommandPaletteSelect)
+                .id("command-palette-input")
+                .width(command_palette_width)
+                .padding([10, 10])
+                .size(14)
+                .style(if self.command_palette_ctx.current.is_empty() {
+                    AppStyle::command_palette_text_input_no_results
+                } else {
+                    AppStyle::command_palette_text_input_with_results
+                }),
+                iced::widget::horizontal_space(),
+            ],
+            row![
+                iced::widget::horizontal_space(),
+                iced::widget::container(self.command_palette_results_view())
+                    .width(command_palette_width)
+                    .style(|_theme| { iced::widget::container::background(color!(0xffffff)) }),
+                iced::widget::horizontal_space(),
+            ],
+        ];
+        iced::widget::stack![base_ui]
+            .push_maybe(if self.command_palette_ctx.active {
+                Some(command_palette_layer)
+            } else {
+                None
+            })
+            .into()
+    }
+
+    fn command_palette_results_view(&self) -> iced::Element<Message> {
+        let mut results = column![];
+        // TODO: visibility (1) -- bold/highlight the parts of the option that match the query.
+        // TODO: visibility (2) -- highlight the background of the current selected option.
+        for (i, option) in self.command_palette_ctx.current.iter().enumerate() {
+            let mut entry = iced::widget::container(
+                iced::widget::text(option).size(14).color(color!(0x3d691f)),
+            )
+            .width(iced::Fill)
+            .padding([5, 10]);
+            if self.command_palette_ctx.selected_index == i as i32 {
+                entry = entry.style(|_theme| iced::widget::container::background(color!(0xcf7c76)));
+            }
+            results = results.push(entry);
+        }
+        results.into()
     }
 }
 
@@ -302,6 +430,88 @@ impl AppStyle {
 
     fn unhighlighted_comment(theme: &iced::widget::Theme) -> iced::widget::container::Style {
         iced::widget::container::transparent(theme)
+    }
+
+    fn command_palette_text_input_with_results(
+        theme: &iced::widget::Theme,
+        status: iced::widget::text_input::Status,
+    ) -> iced::widget::text_input::Style {
+        let mut style = iced::widget::text_input::default(theme, status);
+        style.border.radius.top_right = 5.0;
+        style.border.radius.top_left = 5.0;
+        style.border.radius.bottom_right = 0.0;
+        style.border.radius.bottom_left = 0.0;
+        style
+    }
+
+    fn command_palette_text_input_no_results(
+        theme: &iced::widget::Theme,
+        status: iced::widget::text_input::Status,
+    ) -> iced::widget::text_input::Style {
+        let mut style = iced::widget::text_input::default(theme, status);
+        style.border.radius.top_right = 5.0;
+        style.border.radius.top_left = 5.0;
+        style.border.radius.bottom_right = 5.0;
+        style.border.radius.bottom_left = 5.0;
+        style
+    }
+}
+
+struct CommandPalette {
+    // k-v pair of actions that map to messages that should be emitted
+    // when the action is selected.
+    actions: std::collections::HashMap<String, Message>,
+    // The current relevant actions based on the user's query.
+    current: Vec<String>,
+    query: String,
+    // If true, the command palette is in focus and being used.
+    active: bool,
+    // The option in the commant palette list that is highlighted.
+    selected_index: i32,
+}
+
+impl CommandPalette {
+    fn new() -> Self {
+        Self {
+            actions: std::collections::HashMap::from([
+                // Quit the application...
+                (String::from("quit"), Message::Terminate),
+            ]),
+            current: vec![],
+            query: String::new(),
+            active: false,
+            selected_index: -1,
+        }
+    }
+
+    // Try to select the current highlighted option.
+    // If no option is highlighted, nothing is done.
+    fn maybe_select(&self) -> Option<Message> {
+        if self.selected_index >= self.current.len() as i32 || self.selected_index < 0 {
+            None
+        } else {
+            let selected_key = &self.current[self.selected_index as usize];
+            Some(
+                self.actions
+                    .get(selected_key)
+                    .expect("Unknown action")
+                    .clone(),
+            )
+        }
+    }
+
+    fn update_current_from_query(&mut self, query: String) {
+        let mut current_actions = vec![];
+        let query = query.trim();
+        if !query.is_empty() {
+            for (k, _) in &self.actions {
+                if k.starts_with(query) {
+                    current_actions.push(k.clone());
+                }
+            }
+        }
+        self.current = current_actions;
+        self.query = String::from(query);
     }
 }
 
