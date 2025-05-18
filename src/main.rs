@@ -569,19 +569,8 @@ fn message_stream_sub() -> impl iced::task::Sipper<iced::task::Never, Message> {
     })
 }
 
-// Helper trait to transform a type T to any.
-// Useful for downcasting dyn Trait to concrete type dyn T.
-pub trait AToAny: 'static {
-    fn as_any(&self) -> &dyn std::any::Any;
-}
-impl<T: 'static> AToAny for T {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
-
 #[async_trait]
-trait MessageStream: AToAny + Send + Sync {
+trait MessageStream: Send + Sync {
     async fn next_message(&mut self) -> Option<UserMessage>;
     fn get_broadcaster_and_user_id(&self) -> Option<(String, String, String)>;
 }
@@ -841,7 +830,6 @@ impl AppData {
         let config_contents = std::fs::read_to_string(&config_path).unwrap();
         let mut app_config: AppConfig = toml::from_str(config_contents.as_str()).unwrap();
 
-        // TODO: Also check if the token has expired...
         if let None = app_config.twitch_auth {
             println!("No twitch user access token in app config; regenerating...");
             match auth_twitch_new_access_token(
@@ -855,6 +843,25 @@ impl AppData {
                 }
                 None => {}
             }
+        } else if let Some(twitch_auth) = app_config.twitch_auth.as_ref()
+            && std::time::Instant::now() >= twitch_auth.expiration_timestamp
+        {
+            println!("Using refresh token to generate new access token.");
+            match auth_twitch_refresh_access_token(
+                twitch_auth.refresh_token.as_str(),
+                api_config.twitch_api_client_id.as_str(),
+                api_config.twitch_api_secret.as_str(),
+            )
+            .await?
+            {
+                Some(twitch_auth_info) => {
+                    app_config.twitch_auth = Some(twitch_auth_info);
+                }
+                None => {
+                    eprintln!("Failed to use refresh token to regenerate access token...");
+                    // TODO: Display some error to the user...
+                }
+            }
         } else {
             println!("Using cached twitch user access token.");
         }
@@ -865,6 +872,33 @@ impl AppData {
 
         Ok(Some(AppData::get_configs().await))
     }
+}
+
+// Refreshes an access token using the `refresh_token`.
+async fn auth_twitch_refresh_access_token(
+    refresh_token: &str,
+    client_id: &str,
+    client_secret: &str,
+) -> Result<Option<TwitchAuthPayload>, reqwest::Error> {
+    let client = reqwest::Client::new();
+    let params = [
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh_token),
+        ("client_id", client_id),
+        ("client_secret", client_secret),
+    ];
+    let res = client
+        .post("https://id.twitch.tv/oauth2/token")
+        .form(&params)
+        .send()
+        .await?;
+
+    if res.status() != reqwest::StatusCode::OK {
+        eprintln!("Twitch refresh token response: status={}", res.status());
+        return Ok(None);
+    }
+    let payload = res.text().await?;
+    Ok(twitch_parse_access_token_response(payload.as_str()).await)
 }
 
 // Setup the twitch user authentication.
@@ -1328,7 +1362,10 @@ async fn auth_twitch_new_access_token(
         return Ok(None);
     }
     let payload = res.text().await?;
+    Ok(twitch_parse_access_token_response(payload.as_str()).await)
+}
 
+async fn twitch_parse_access_token_response(response_payload: &str) -> Option<TwitchAuthPayload> {
     #[derive(Deserialize)]
     struct InlineTwitchAuthPayload {
         access_token: String,
@@ -1337,11 +1374,11 @@ async fn auth_twitch_new_access_token(
     }
 
     let twitch_user_pload: InlineTwitchAuthPayload =
-        serde_json::from_str(payload.as_str()).unwrap();
+        serde_json::from_str(response_payload).unwrap();
 
     if twitch_user_pload.access_token.len() == 0 || twitch_user_pload.refresh_token.len() == 0 {
         eprintln!("Failed to get user's access or refresh token...");
-        return Ok(None);
+        return None;
     }
     let full_twitch_user_payload = TwitchAuthPayload {
         access_token: twitch_user_pload.access_token,
@@ -1351,7 +1388,7 @@ async fn auth_twitch_new_access_token(
             .unwrap(),
     };
     println!("RESULT={:?}", full_twitch_user_payload);
-    Ok(Some(full_twitch_user_payload))
+    Some(full_twitch_user_payload)
 }
 
 async fn twitch_send_message(
