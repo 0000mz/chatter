@@ -157,10 +157,10 @@ impl StreamChat {
                 self.command_palette_ctx.update_current_from_query(search);
                 iced::Task::none()
             }
-            Message::CommandPaletteSelect => {
-                self.command_palette_ctx.maybe_select();
-                iced::Task::none()
-            }
+            Message::CommandPaletteSelect => match self.command_palette_ctx.maybe_select() {
+                Some(msg) => iced::Task::done(msg),
+                None => iced::Task::none(),
+            },
             Message::SendInputMessage => {
                 let message = self.input_message.trim();
                 if message.len() == 0 {
@@ -457,7 +457,9 @@ impl AppStyle {
 }
 
 struct CommandPalette {
-    actions: std::collections::HashMap<String, String>,
+    // k-v pair of actions that map to messages that should be emitted
+    // when the action is selected.
+    actions: std::collections::HashMap<String, Message>,
     // The current relevant actions based on the user's query.
     current: Vec<String>,
     query: String,
@@ -472,7 +474,7 @@ impl CommandPalette {
         Self {
             actions: std::collections::HashMap::from([
                 // Quit the application...
-                (String::from("quit"), String::from("execute quit action")),
+                (String::from("quit"), Message::Terminate),
             ]),
             current: vec![],
             query: String::new(),
@@ -483,14 +485,17 @@ impl CommandPalette {
 
     // Try to select the current highlighted option.
     // If no option is highlighted, nothing is done.
-    fn maybe_select(&self) -> Option<()> {
+    fn maybe_select(&self) -> Option<Message> {
         if self.selected_index >= self.current.len() as i32 || self.selected_index < 0 {
             None
         } else {
             let selected_key = &self.current[self.selected_index as usize];
-            let action_exec = self.actions.get(selected_key).expect("Unknown action");
-            println!("TODO: do something with the action: => \"{}\"", action_exec);
-            None
+            Some(
+                self.actions
+                    .get(selected_key)
+                    .expect("Unknown action")
+                    .clone(),
+            )
         }
     }
 
