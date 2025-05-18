@@ -222,7 +222,8 @@ impl StreamChat {
                     }
                 }
                 arrow @ iced::keyboard::key::Named::ArrowUp
-                | arrow @ iced::keyboard::key::Named::ArrowDown => {
+                | arrow @ iced::keyboard::key::Named::ArrowDown
+                | arrow @ iced::keyboard::key::Named::Tab => {
                     let delta = if arrow == iced::keyboard::key::Named::ArrowUp {
                         -1
                     } else {
@@ -248,19 +249,19 @@ impl StreamChat {
 
     fn subscription(&self) -> iced::Subscription<Message> {
         if let (Some(_), Some(_)) = (&self.api_config, &self.app_config) {
-            let keypress_sub = iced::keyboard::on_key_release(|key, mods| {
-                match (key.as_ref(), mods) {
+            let keypress_sub =
+                iced::keyboard::on_key_release(|key, mods| match (key.as_ref(), mods) {
                     (iced::keyboard::Key::Named(k @ iced::keyboard::key::Named::Escape), _)
                     | (iced::keyboard::Key::Named(k @ iced::keyboard::key::Named::ArrowUp), _)
-                    | (iced::keyboard::Key::Named(k @ iced::keyboard::key::Named::ArrowDown), _) => {
+                    | (iced::keyboard::Key::Named(k @ iced::keyboard::key::Named::ArrowDown), _)
+                    | (iced::keyboard::Key::Named(k @ iced::keyboard::key::Named::Tab), _) => {
                         Some(Message::HandleSpecialKey(k))
                     }
                     (iced::keyboard::Key::Character("p"), iced::keyboard::Modifiers::CTRL) => {
                         Some(Message::ToggleCommandPalette(true))
                     }
                     _ => None,
-                }
-            });
+                });
             let message_stream_sub = iced::Subscription::run(message_stream_sub);
             iced::Subscription::batch([keypress_sub, message_stream_sub])
         } else {
