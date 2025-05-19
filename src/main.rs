@@ -4,13 +4,10 @@ use iced::widget::{column, rich_text, row, span};
 use iced::{Font, color, font};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet};
 use std::vec::Vec;
 
 fn main() -> iced::Result {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() < 2 {
-        panic!("Expected argument to chat stream.");
-    }
     iced::application(StreamChat::boot, StreamChat::update, StreamChat::view)
         .subscription(StreamChat::subscription)
         .title(StreamChat::title)
@@ -19,24 +16,37 @@ fn main() -> iced::Result {
 }
 
 #[derive(Clone)]
-enum Message {
-    InitializeApp,
-    UpdateAppConfig(Option<(ApiConfig, AppConfig)>),
+enum ChatStreamMessage {
     InitializeChatError(String),
-    MessagePost(UserMessage),
+    // TODO: Use a struct instead of a tuple so that the fields are named.
+    SaveBroadcasterInfo(String, String),
+    SaveUserId(String),
     // If bool is true, then the stream has been initialized in the
     // subscription successfully.
     MessageStreamInitState(bool),
+    MessagePost(UserMessage),
+}
+
+#[derive(Clone)]
+enum Message {
+    InitializeApp,
+    OpenChatStream(String),
+    ChatStreamError(Result<(), String>),
+    UpdateAppConfig(Option<(ApiConfig, AppConfig)>),
+    HandleChatStreamOutput(ChatStreamMessage),
     InputMessageChanged(String),
-    SaveBroadcasterInfo((String, String)),
-    SaveUserId(String),
     SendInputMessage,
+    HandleError(String),
     // If true, the command palette will be set to active.
     // Otherwise, it will be set to inactive.
-    ToggleCommandPalette(bool),
+    CommandPaletteToggle(bool),
     CommandPaletteSearchChanged(String),
     // Selects the currently selected command palette option.
     CommandPaletteSelect,
+    // Handle a command palette action where the first arg is the
+    // action name and the second part are the arguments passed
+    // to the action to be processed.
+    CommandPaletteHandleAction(String, Option<Vec<String>>),
     // Received when the ESC key is pressed. What should happen depends
     // entirely on the current state of the application.
     // i.e. if the current focus is the command palette, then exit it.
@@ -54,11 +64,19 @@ impl std::fmt::Debug for Message {
     }
 }
 
+struct ChatInstance {
+    active_messages: VecDeque<UserMessage>,
+    // Abort the stream that handles the websocket communication for this
+    // chat instance.
+    abort_stream: Option<iced::task::Handle>,
+}
+
 struct StreamChat {
     // If true, the message stream has already spawned a subscription
     // that will feed messages to the ui.
     subscribed_to_message_stream: bool,
-    active_messages: VecDeque<UserMessage>,
+    active_chat_instance: String,
+    chat_instances: HashMap<String, ChatInstance>,
     input_message: String,
     api_config: Option<ApiConfig>,
     app_config: Option<AppConfig>,
@@ -76,7 +94,8 @@ impl StreamChat {
     fn new() -> Self {
         StreamChat {
             subscribed_to_message_stream: false,
-            active_messages: VecDeque::new(),
+            active_chat_instance: String::new(),
+            chat_instances: HashMap::new(),
             input_message: String::new(),
             api_config: None,
             app_config: None,
@@ -114,8 +133,52 @@ impl StreamChat {
                 ),
                 iced::Task::done(Message::FocusChatArea),
             ]),
+            Message::OpenChatStream(stream_name) => {
+                println!("Opening chat stream: {}", stream_name);
+
+                if self.chat_instances.contains_key(&stream_name) {
+                    eprintln!("Chat instance for stream already open: {}", stream_name);
+                    iced::Task::none()
+                } else {
+                    let new_instance = ChatInstance {
+                        active_messages: VecDeque::new(),
+                        abort_stream: None,
+                    };
+                    self.chat_instances
+                        .insert(stream_name.clone(), new_instance);
+
+                    // TODO: Fix -- This if statement is unnecessary, we just insereted it so
+                    // we know its in the map.
+                    if let Some(instance) = self.chat_instances.get_mut(&stream_name) {
+                        let (task, handle) = iced::Task::sip(
+                            subscribe_to_chat_stream(format!("twitch://{}", stream_name)),
+                            Message::HandleChatStreamOutput,
+                            Message::ChatStreamError,
+                        )
+                        .abortable();
+                        instance.abort_stream = Some(handle);
+
+                        self.active_chat_instance = stream_name;
+                        iced::Task::batch([
+                            task,
+                            iced::Task::done(Message::CommandPaletteToggle(false)),
+                        ])
+                    } else {
+                        eprintln!("No stream instance found for {}", stream_name);
+                        iced::Task::none()
+                    }
+                }
+            }
+            Message::ChatStreamError(result) => {
+                if let Err(error_message) = result {
+                    eprintln!("ChatStreamErorr: {}", error_message);
+                    iced::Task::done(Message::Terminate)
+                } else {
+                    iced::Task::none()
+                }
+            }
             Message::UpdateAppConfig(config) => match config {
-                None => iced::Task::done(Message::InitializeChatError(String::from(
+                None => iced::Task::done(Message::HandleError(String::from(
                     "Failed to initialize config.",
                 ))),
                 Some((api_config, app_config)) => {
@@ -124,22 +187,46 @@ impl StreamChat {
                     iced::Task::none()
                 }
             },
-            Message::InitializeChatError(error_message) => {
+            Message::HandleChatStreamOutput(message) => match message {
+                ChatStreamMessage::SaveUserId(user_id) => {
+                    self.user_id = Some(user_id);
+                    iced::Task::none()
+                }
+                ChatStreamMessage::MessagePost(message) => {
+                    match self.chat_instances.get_mut(&self.active_chat_instance) {
+                        Some(instance) => {
+                            instance.active_messages.push_back(message);
+                            // TODO: Optimize, do not remove one by one...
+                            while instance.active_messages.len() > 100 {
+                                instance.active_messages.pop_front();
+                            }
+                        }
+                        None => {
+                            eprintln!(
+                                "Cannot post message: No chat instance for: \"{}\"",
+                                self.active_chat_instance,
+                            );
+                        }
+                    }
+                    iced::Task::none()
+                }
+                ChatStreamMessage::SaveBroadcasterInfo(broadcaster_id, broadcaster_name) => {
+                    self.broadcaster_id = Some(broadcaster_id);
+                    self.broadcaster_name = Some(broadcaster_name);
+                    iced::Task::none()
+                }
+                ChatStreamMessage::MessageStreamInitState(stream_init_success) => {
+                    self.subscribed_to_message_stream = stream_init_success;
+                    iced::Task::none()
+                }
+                ChatStreamMessage::InitializeChatError(error_message) => {
+                    iced::Task::done(Message::HandleError(error_message))
+                }
+            },
+            Message::HandleError(error_message) => {
                 // TODO: display the error in some modal.
                 eprintln!("Erorr: {}", error_message);
                 iced::Task::done(Message::Terminate)
-            }
-            Message::MessagePost(message) => {
-                self.active_messages.push_back(message);
-                // TODO: Optimize, do not remove one by one...
-                while self.active_messages.len() > 100 {
-                    self.active_messages.pop_front();
-                }
-                iced::Task::none()
-            }
-            Message::MessageStreamInitState(stream_init_success) => {
-                self.subscribed_to_message_stream = stream_init_success;
-                iced::Task::none()
             }
             Message::Terminate => iced::window::get_oldest().then(|id| {
                 if let Some(id) = id {
@@ -196,16 +283,7 @@ impl StreamChat {
                     }
                 }
             }
-            Message::SaveUserId(user_id) => {
-                self.user_id = Some(user_id);
-                iced::Task::none()
-            }
-            Message::SaveBroadcasterInfo((broadcaster_id, broadcaster_name)) => {
-                self.broadcaster_id = Some(broadcaster_id);
-                self.broadcaster_name = Some(broadcaster_name);
-                iced::Task::none()
-            }
-            Message::ToggleCommandPalette(enabled) => {
+            Message::CommandPaletteToggle(enabled) => {
                 self.command_palette_ctx.active = enabled;
                 iced::widget::text_input::focus("command-palette-input")
             }
@@ -234,8 +312,8 @@ impl StreamChat {
                         if next_index < -1 {
                             next_index = -1;
                         }
-                        if next_index >= self.command_palette_ctx.current.len() as i32 {
-                            next_index = self.command_palette_ctx.current.len() as i32 - 1;
+                        if next_index >= self.command_palette_ctx.current_action.len() as i32 {
+                            next_index = self.command_palette_ctx.current_action.len() as i32 - 1;
                         }
                         self.command_palette_ctx.selected_index = next_index;
                     }
@@ -243,6 +321,32 @@ impl StreamChat {
                 }
                 _ => iced::Task::none(),
             },
+            Message::CommandPaletteHandleAction(action, args) => {
+                println!(
+                    "DBG command palette: handle action = {}, arg = {:?}",
+                    action, args
+                );
+                match action.as_str() {
+                    "quit" => iced::Task::done(Message::Terminate),
+                    "open stream" => {
+                        match args {
+                            Some(args) => {
+                                iced::Task::done(Message::OpenChatStream(args[0].clone()))
+                            }
+                            None => {
+                                // TODO: this should probably not be fatal?
+                                iced::Task::done(Message::HandleError(String::from(
+                                    "No stream selected to open...",
+                                )))
+                            }
+                        }
+                    }
+                    _ => iced::Task::done(Message::HandleError(format!(
+                        "Unknown action: {}",
+                        action
+                    ))),
+                }
+            }
             Message::Nothing(_) => iced::Task::none(),
         }
     }
@@ -258,12 +362,12 @@ impl StreamChat {
                         Some(Message::HandleSpecialKey(k))
                     }
                     (iced::keyboard::Key::Character("p"), iced::keyboard::Modifiers::CTRL) => {
-                        Some(Message::ToggleCommandPalette(true))
+                        Some(Message::CommandPaletteToggle(true))
                     }
                     _ => None,
                 });
-            let message_stream_sub = iced::Subscription::run(message_stream_sub);
-            iced::Subscription::batch([keypress_sub, message_stream_sub])
+            // TODO: No need to batch this since it's only one subscription.
+            iced::Subscription::batch([keypress_sub])
         } else {
             iced::Subscription::none()
         }
@@ -271,34 +375,36 @@ impl StreamChat {
 
     fn view(&self) -> iced::Element<Message> {
         let mut v = column![];
-        for msg in &self.active_messages {
-            v = v.push(
-                iced::widget::container(
-                    rich_text![
-                        span(format!("{}: ", &msg.username))
-                            .color(color!(0xff0000))
-                            .font(Font {
-                                weight: font::Weight::Bold,
-                                ..Font::default()
-                            }),
-                        span(&msg.message)
-                    ]
-                    // Filler to supress compiler.
-                    .on_link_click(|_link: u32| Message::Terminate)
-                    .size(14),
-                )
-                .style(
-                    if let Some(user_id) = self.user_id.as_ref()
-                        && msg.user_id.as_str() == user_id.as_str()
-                    {
-                        AppStyle::highlighted_comment
-                    } else {
-                        AppStyle::unhighlighted_comment
-                    },
-                )
-                .padding([0, 10])
-                .width(iced::Fill),
-            );
+        if let Some(instance) = self.chat_instances.get(&self.active_chat_instance) {
+            for msg in &instance.active_messages {
+                v = v.push(
+                    iced::widget::container(
+                        rich_text![
+                            span(format!("{}: ", &msg.username))
+                                .color(color!(0xff0000))
+                                .font(Font {
+                                    weight: font::Weight::Bold,
+                                    ..Font::default()
+                                }),
+                            span(&msg.message)
+                        ]
+                        // Filler to supress compiler.
+                        .on_link_click(|_link: u32| Message::Terminate)
+                        .size(14),
+                    )
+                    .style(
+                        if let Some(user_id) = self.user_id.as_ref()
+                            && msg.user_id.as_str() == user_id.as_str()
+                        {
+                            AppStyle::highlighted_comment
+                        } else {
+                            AppStyle::unhighlighted_comment
+                        },
+                    )
+                    .padding([0, 10])
+                    .width(iced::Fill),
+                );
+            }
         }
 
         let base_ui = column![
@@ -379,7 +485,7 @@ impl StreamChat {
                 .width(command_palette_width)
                 .padding([10, 10])
                 .size(14)
-                .style(if self.command_palette_ctx.current.is_empty() {
+                .style(if self.command_palette_ctx.current_action.is_empty() {
                     AppStyle::command_palette_text_input_no_results
                 } else {
                     AppStyle::command_palette_text_input_with_results
@@ -407,7 +513,7 @@ impl StreamChat {
         let mut results = column![];
         // TODO: visibility (1) -- bold/highlight the parts of the option that match the query.
         // TODO: visibility (2) -- highlight the background of the current selected option.
-        for (i, option) in self.command_palette_ctx.current.iter().enumerate() {
+        for (i, option) in self.command_palette_ctx.current_action.iter().enumerate() {
             let mut entry = iced::widget::container(
                 iced::widget::text(option).size(14).color(color!(0x3d691f)),
             )
@@ -460,9 +566,12 @@ impl AppStyle {
 struct CommandPalette {
     // k-v pair of actions that map to messages that should be emitted
     // when the action is selected.
-    actions: std::collections::HashMap<String, Message>,
+    // TODO: Find a way to use a hash map that stores the enum message
+    // that should be emitted when the action is selected.
+    actions: HashSet<String>,
     // The current relevant actions based on the user's query.
-    current: Vec<String>,
+    current_action: Vec<String>,
+    current_action_arg: String,
     query: String,
     // If true, the command palette is in focus and being used.
     active: bool,
@@ -473,11 +582,14 @@ struct CommandPalette {
 impl CommandPalette {
     fn new() -> Self {
         Self {
-            actions: std::collections::HashMap::from([
-                // Quit the application...
-                (String::from("quit"), Message::Terminate),
+            actions: std::collections::HashSet::from([
+                // Quits the application.
+                String::from("quit"),
+                // Opens the stream.
+                String::from("open stream"),
             ]),
-            current: vec![],
+            current_action: vec![],
+            current_action_arg: String::new(),
             query: String::new(),
             active: false,
             selected_index: -1,
@@ -487,30 +599,52 @@ impl CommandPalette {
     // Try to select the current highlighted option.
     // If no option is highlighted, nothing is done.
     fn maybe_select(&self) -> Option<Message> {
-        if self.selected_index >= self.current.len() as i32 || self.selected_index < 0 {
+        if self.selected_index >= self.current_action.len() as i32 || self.selected_index < 0 {
             None
         } else {
-            let selected_key = &self.current[self.selected_index as usize];
-            Some(
-                self.actions
-                    .get(selected_key)
-                    .expect("Unknown action")
-                    .clone(),
-            )
+            let selected_key = &self.current_action[self.selected_index as usize];
+            Some(Message::CommandPaletteHandleAction(
+                selected_key.clone(),
+                if self.current_action_arg.is_empty() {
+                    None
+                } else {
+                    Some(vec![self.current_action_arg.clone()])
+                },
+            ))
         }
     }
 
     fn update_current_from_query(&mut self, query: String) {
         let mut current_actions = vec![];
-        let query = query.trim();
-        if !query.is_empty() {
-            for (k, _) in &self.actions {
-                if k.starts_with(query) {
+        let query = query.trim_start();
+
+        // query has 2 parts-- first part is before a colon
+        // (if there is one), and second part is after the colon.
+        // The part before the colon is the action and the part
+        // after the colon are the arguments for the action.
+
+        let parts = query.splitn(2, ":").collect::<Vec<&str>>();
+        let action = if parts.is_empty() { "" } else { parts[0] };
+
+        if !action.is_empty() {
+            for k in &self.actions {
+                if k.starts_with(action) {
                     current_actions.push(k.clone());
                 }
             }
         }
-        self.current = current_actions;
+
+        // If any action is available that matches the query, and the
+        // selected index is on no actions, auto select the first action.
+        if !current_actions.is_empty() && self.selected_index == -1 {
+            self.selected_index = 0;
+        }
+        self.current_action = current_actions;
+        self.current_action_arg = if parts.len() == 2 {
+            String::from(parts[1])
+        } else {
+            String::new()
+        };
         self.query = String::from(query);
     }
 }
@@ -531,47 +665,39 @@ async fn create_message_stream_initializer(
     }
 }
 
-// Subscription that reads messages from the chat websocket continuously
-// and outputs the received messages back to the application's update.
-fn message_stream_sub() -> impl iced::task::Sipper<iced::task::Never, Message> {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() < 2 {
-        panic!("Expected argument to chat stream.");
-    }
-    iced::task::sipper(async |mut output| {
-        loop {
-            let args: Vec<String> = std::env::args().collect();
-            if args.len() < 2 {
-                panic!("Expected argument to chat stream.");
+fn subscribe_to_chat_stream(url: String) -> impl iced::task::Straw<(), ChatStreamMessage, String> {
+    iced::task::sipper(async move |mut output| {
+        let stream = create_message_stream_initializer(url.as_str()).await;
+        if let Err(e) = stream {
+            // TODO: Return the error instead of emitting the error message...
+            output.send(ChatStreamMessage::InitializeChatError(e)).await;
+        } else if let Ok(mut stream) = stream {
+            if let Some((broadcaster_id, broadcaster_name, user_id)) =
+                stream.get_broadcaster_and_user_id()
+            {
+                output
+                    .send(ChatStreamMessage::SaveBroadcasterInfo(
+                        broadcaster_id,
+                        broadcaster_name,
+                    ))
+                    .await;
+                output.send(ChatStreamMessage::SaveUserId(user_id)).await;
             }
-            let url = args[1].clone();
-
-            let stream = create_message_stream_initializer(url.as_str()).await;
-            if let Err(e) = stream {
-                output.send(Message::InitializeChatError(e)).await;
-            } else if let Ok(mut stream) = stream {
-                if let Some((broadcaster_id, broadcaster_name, user_id)) =
-                    stream.get_broadcaster_and_user_id()
-                {
+            output
+                .send(ChatStreamMessage::MessageStreamInitState(true))
+                .await;
+            loop {
+                let user_message = stream.next_message().await;
+                if let Some(user_message) = user_message {
+                    // output.send(Message::MessagePost(user_message)).await;
                     output
-                        .send(Message::SaveBroadcasterInfo((
-                            broadcaster_id,
-                            broadcaster_name,
-                        )))
+                        .send(ChatStreamMessage::MessagePost(user_message))
                         .await;
-                    output.send(Message::SaveUserId(user_id)).await;
                 }
-
-                output.send(Message::MessageStreamInitState(true)).await;
-                loop {
-                    let user_message = stream.next_message().await;
-                    if let Some(user_message) = user_message {
-                        output.send(Message::MessagePost(user_message)).await;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_nanos(100)).await;
-                }
+                tokio::time::sleep(std::time::Duration::from_nanos(100)).await;
             }
         }
+        Ok(())
     })
 }
 

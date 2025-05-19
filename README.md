@@ -1,6 +1,3 @@
-- Running against a csv file: `cargo run -- file://data/chat1.txt`
-- Running against a twitch stream: `cargo run -- twitch://<twitch_username>` i.e. `cargo run -- twitch://northernlion`
-
 ## Twitch Config
 To configure twitch:
 1. Create a dev account and acquire the client id and secret.
@@ -31,7 +28,7 @@ cargo install --git https://github.com/mstange/samply.git samply
 RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release
 
 # Run app while recording profile
-samply record target/release/streamchat "twitch://northernlion"
+samply record target/release/streamchat
 ```
 
 ## TODO
