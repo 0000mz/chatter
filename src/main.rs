@@ -651,6 +651,11 @@ impl AppStyle {
             style.border.radius.bottom_left = 5.0;
             style.border.radius.bottom_right = 5.0;
         }
+        style.shadow = iced::Shadow {
+            color: color!(0x000000, 0.2),
+            blur_radius: 10 as f32,
+            offset: iced::Vector::new(0 as f32, 5 as f32),
+        };
         style
     }
 
