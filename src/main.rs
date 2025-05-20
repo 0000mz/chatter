@@ -162,10 +162,7 @@ impl StreamChat {
                         instance.abort_stream = Some(handle);
 
                         self.active_chat_instance = stream_name;
-                        iced::Task::batch([
-                            task,
-                            iced::Task::done(Message::CommandPaletteToggle(false)),
-                        ])
+                        task
                     } else {
                         eprintln!("No stream instance found for {}", stream_name);
                         iced::Task::none()
@@ -248,7 +245,10 @@ impl StreamChat {
                 iced::Task::none()
             }
             Message::CommandPaletteSelect => match self.command_palette_ctx.maybe_select() {
-                Some(msg) => iced::Task::done(msg),
+                Some(msg) => iced::Task::batch([
+                    iced::Task::done(msg),
+                    iced::Task::done(Message::CommandPaletteToggle(false)),
+                ]),
                 None => iced::Task::none(),
             },
             Message::SendInputMessage => {
@@ -286,21 +286,20 @@ impl StreamChat {
                     }
                 }
             }
-            Message::CommandPaletteToggle(enabled) => {
-                self.command_palette_ctx.active = enabled;
-                iced::widget::text_input::focus("command-palette-input")
+            Message::CommandPaletteToggle(enable_command_palette) => {
+                self.command_palette_ctx.active = enable_command_palette;
+                if enable_command_palette {
+                    iced::widget::text_input::focus("command-palette-input")
+                } else {
+                    self.command_palette_ctx
+                        .update_current_from_query(String::new());
+                    iced::Task::done(Message::FocusChatArea)
+                }
             }
             Message::FocusChatArea => iced::widget::text_input::focus("chat-message-input"),
             Message::HandleSpecialKey(key) => match key {
                 iced::keyboard::key::Named::Escape => {
-                    if self.command_palette_ctx.active {
-                        self.command_palette_ctx.active = false;
-                        self.command_palette_ctx
-                            .update_current_from_query(String::new());
-                        iced::Task::done(Message::FocusChatArea)
-                    } else {
-                        iced::Task::none()
-                    }
+                    iced::Task::done(Message::CommandPaletteToggle(false))
                 }
                 arrow @ iced::keyboard::key::Named::ArrowUp
                 | arrow @ iced::keyboard::key::Named::ArrowDown
@@ -329,10 +328,6 @@ impl StreamChat {
                 self.command_palette_ctx.update_selected_query(index)
             }
             Message::CommandPaletteHandleAction(action, args) => {
-                println!(
-                    "DBG command palette: handle action = {}, arg = {:?}",
-                    action, args
-                );
                 match action.as_str() {
                     "quit" => iced::Task::done(Message::Terminate),
                     "open stream" => {
@@ -414,28 +409,36 @@ impl StreamChat {
             }
         }
 
-        let base_ui = column![
-            iced::widget::container(row![
-                iced::widget::container(iced::widget::text(
-                    if let Some(name) = self.broadcaster_name.as_ref() {
-                        name
-                    } else {
-                        "unnamed"
-                    }
-                ))
-                .style(|_theme| {
-                    // TODO: reused style -- Add this to some global theme.
-                    let outline_color = color!(0x4828ad);
-                    iced::widget::container::background(outline_color)
-                })
-                .padding([5, 10])
-            ])
-            .width(iced::Fill)
+        let stream_tab_line_height = 30;
+        let stream_tab = |stream_name| {
+            iced::widget::container(iced::widget::text(stream_name).line_height(
+                iced::widget::text::LineHeight::Absolute(iced::Pixels(
+                    stream_tab_line_height as f32,
+                )),
+            ))
             .style(|_theme| {
                 // TODO: reused style -- Add this to some global theme.
-                let outline_color = color!(0x2d1870);
+                let outline_color = color!(0x4828ad);
                 iced::widget::container::background(outline_color)
-            }),
+            })
+            .padding([0, 10])
+        };
+
+        let mut stream_tab_row = row![];
+        // TODO: Make a tab for all of the open streams, not just the active one.
+        if let Some(stream_name) = self.broadcaster_name.as_ref() {
+            stream_tab_row = stream_tab_row.push(stream_tab(stream_name));
+        }
+
+        let base_ui = column![
+            iced::widget::container(stream_tab_row)
+                .height(stream_tab_line_height)
+                .width(iced::Fill)
+                .style(|_theme| {
+                    // TODO: reused style -- Add this to some global theme.
+                    let outline_color = color!(0x2d1870);
+                    iced::widget::container::background(outline_color)
+                }),
             iced::widget::scrollable(v)
                 .width(iced::Fill)
                 .height(iced::Fill)
