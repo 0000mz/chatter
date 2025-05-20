@@ -36,3 +36,6 @@ samply record target/release/streamchat
 - When user scrolls up in the chat, do not append new messages. This should prevent the chat moving away when
   trying to read some previous message.
 - The text input should be multiline so that long messages are still visible.
+- Twitch: You can create a maximum of 3 WebSockets connections with enabled subscriptions. Reconnecting using a reconnection URL (see Reconnect message) doesn’t add to your WebSocket count.
+  - Implement chat caching that will temp disconnect from inactive tabs and reconnect to them when
+    they are refocused. (https://dev.twitch.tv/docs/eventsub/handling-websocket-events/)
