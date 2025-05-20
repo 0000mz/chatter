@@ -37,6 +37,7 @@ enum Message {
     HandleChatStreamOutput(ChatStreamMessage),
     InputMessageChanged(String),
     SendInputMessage,
+    SwitchActiveChat(String),
     HandleError(String),
     // If true, the command palette will be set to active.
     // Otherwise, it will be set to inactive.
@@ -340,6 +341,12 @@ impl StreamChat {
                     }
                 }
             }
+            Message::SwitchActiveChat(active_chat) => {
+                if self.chat_instances.contains_key(&active_chat) {
+                    self.active_chat_instance = active_chat;
+                }
+                iced::Task::none()
+            }
             Message::CommandPaletteToggle(enable_command_palette, starting_query) => {
                 self.command_palette_ctx.active = enable_command_palette;
                 if enable_command_palette {
@@ -479,23 +486,19 @@ impl StreamChat {
         }
 
         let stream_tab_line_height = 30;
-        let stream_tab = |stream_name, active| {
-            let mut tab = iced::widget::container(iced::widget::text(stream_name).line_height(
-                iced::widget::text::LineHeight::Absolute(iced::Pixels(
-                    stream_tab_line_height as f32,
-                )),
-            ))
-            .padding([0, 10]);
+        let stream_tab = |stream_name: String, active| {
+            let mut tab = iced::widget::button(iced::widget::text(stream_name.clone()))
+                .on_press(Message::SwitchActiveChat(stream_name.clone()));
             if active {
-                tab = tab.style(|_theme| {
+                tab = tab.style(|theme, status| {
                     // TODO: reused style -- Add this to some global theme.
                     let outline_color = color!(0x4828ad);
-                    iced::widget::container::background(outline_color)
+                    iced::widget::button::primary(theme, status).with_background(outline_color)
                 });
             } else {
-                tab = tab.style(|_theme| {
+                tab = tab.style(|theme, status| {
                     let outline_color = color!(0x402599);
-                    iced::widget::container::background(outline_color)
+                    iced::widget::button::primary(theme, status).with_background(outline_color)
                 });
             }
 
@@ -506,7 +509,7 @@ impl StreamChat {
         for (stream_name, _) in &self.chat_instances {
             // TODO: When an inactive tab is clicked on, switch to that tab.
             let active_tab = &self.active_chat_instance == stream_name;
-            stream_tab_row = stream_tab_row.push(stream_tab(stream_name, active_tab));
+            stream_tab_row = stream_tab_row.push(stream_tab(stream_name.clone(), active_tab));
         }
 
         let base_ui = column![
