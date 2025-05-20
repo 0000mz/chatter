@@ -459,12 +459,12 @@ impl StreamChat {
                     iced::widget::container(
                         rich_text![
                             span(format!("{}: ", &msg.username))
-                                .color(color!(0xff0000))
+                                .color(color!(0x000000))
                                 .font(Font {
                                     weight: font::Weight::Bold,
                                     ..Font::default()
                                 }),
-                            span(&msg.message)
+                            span(&msg.message).color(color!(0x212121))
                         ]
                         // Filler to supress compiler.
                         .on_link_click(|_link: u32| Message::Terminate)
@@ -491,14 +491,11 @@ impl StreamChat {
                 .on_press(Message::SwitchActiveChat(stream_name.clone()));
             if active {
                 tab = tab.style(|theme, status| {
-                    // TODO: reused style -- Add this to some global theme.
-                    let outline_color = color!(0x4828ad);
-                    iced::widget::button::primary(theme, status).with_background(outline_color)
+                    iced::widget::button::primary(theme, status).with_background(color!(0x193827))
                 });
             } else {
                 tab = tab.style(|theme, status| {
-                    let outline_color = color!(0x402599);
-                    iced::widget::button::primary(theme, status).with_background(outline_color)
+                    iced::widget::button::primary(theme, status).with_background(color!(0x132C1F))
                 });
             }
 
@@ -512,33 +509,43 @@ impl StreamChat {
             stream_tab_row = stream_tab_row.push(stream_tab(stream_name.clone(), active_tab));
         }
 
+        let scrollable_chat_area = iced::widget::scrollable(v)
+            .width(iced::Fill)
+            .height(iced::Fill)
+            .style(|theme, status| {
+                let mut style = iced::widget::scrollable::default(theme, status);
+                style.container =
+                    style
+                        .container
+                        .background(iced::Background::Gradient(make_gradient(
+                            color!(0xD9CEBD),
+                            color!(0xEDE4D5),
+                            0 as f32,
+                        )));
+                style
+            })
+            .anchor_bottom();
+
         let base_ui = column![
             iced::widget::container(stream_tab_row)
                 .height(stream_tab_line_height)
                 .width(iced::Fill)
-                .style(|_theme| {
-                    // TODO: reused style -- Add this to some global theme.
-                    let outline_color = color!(0x2d1870);
-                    iced::widget::container::background(outline_color)
-                }),
-            iced::widget::scrollable(v)
-                .width(iced::Fill)
-                .height(iced::Fill)
-                .anchor_bottom(),
+                .style(|_theme| { iced::widget::container::background(color!(0x132C1F)) }),
+            scrollable_chat_area,
             row![
                 iced::widget::text_input("Send chat message...", self.input_message.as_str())
                     .id("chat-message-input")
                     .on_input(Message::InputMessageChanged)
                     .on_submit(Message::SendInputMessage)
                     .width(iced::Fill)
-                    .padding([10, 20])
+                    .padding([20, 20])
                     .style(|theme, status| {
-                        // TODO: reused style -- Add this to some global theme.
-                        let outline_color = color!(0x4828ad);
+                        let color = color!(0xccc2b3);
                         let mut style = iced::widget::text_input::default(theme, status);
                         style.border.radius = iced::border::left(0.0);
-                        style.border.color = outline_color;
-                        style.background = iced::Background::Color(color!(0x000000));
+                        style.border.color = color;
+                        style.value = color!(0x000000);
+                        style.background = iced::Background::Color(color);
                         style
                     }),
                 iced::widget::button("Send")
@@ -550,14 +557,16 @@ impl StreamChat {
                         }
                     })())
                     .style(|theme, status| {
-                        // TODO: reused style -- Add this to some global theme.
-                        let outline_color = color!(0x4828ad);
                         let mut style = iced::widget::button::primary(theme, status);
                         style.border.radius = iced::border::left(0.0);
-                        style.background = Some(iced::Background::Color(outline_color));
+                        style.background = Some(iced::Background::Gradient(make_gradient(
+                            color!(0xecb073),
+                            color!(0xEABEC0),
+                            0 as f32,
+                        )));
                         style
                     })
-                    .padding([10, 20])
+                    .padding(20)
             ]
         ];
 
@@ -603,17 +612,16 @@ impl StreamChat {
 
     fn command_palette_results_view(&self) -> iced::Element<Message> {
         let mut results = column![];
-        // TODO: visibility (1) -- bold/highlight the parts of the option that match the query.
-        // TODO: visibility (2) -- highlight the background of the current selected option.
+        // TODO: visibility -- bold/highlight the parts of the option that match the query.
         for (i, option) in self.command_palette_ctx.current_action.iter().enumerate() {
-            let mut entry = iced::widget::container(
-                iced::widget::text(option).size(14).color(color!(0x3d691f)),
+            let active = self.command_palette_ctx.selected_index == i as i32;
+            let is_last = i + 1 == self.command_palette_ctx.current_action.len();
+            let entry = iced::widget::container(
+                iced::widget::text(option).size(14).color(color!(0x000000)),
             )
             .width(iced::Fill)
-            .padding([5, 10]);
-            if self.command_palette_ctx.selected_index == i as i32 {
-                entry = entry.style(|_theme| iced::widget::container::background(color!(0xcf7c76)));
-            }
+            .padding([5, 10])
+            .style(move |_theme| AppStyle::command_palette_result_entry_container(active, is_last));
             results = results.push(entry);
         }
         results.into()
@@ -630,11 +638,39 @@ impl AppStyle {
         iced::widget::container::transparent(theme)
     }
 
-    fn command_palette_text_input_with_results(
+    fn command_palette_result_entry_container(
+        active: bool,
+        is_last: bool,
+    ) -> iced::widget::container::Style {
+        let mut style = if active {
+            iced::widget::container::background(color!(0xada292))
+        } else {
+            iced::widget::container::background(color!(0xbab0a2))
+        };
+        if is_last {
+            style.border.radius.bottom_left = 5.0;
+            style.border.radius.bottom_right = 5.0;
+        }
+        style
+    }
+
+    fn command_palette_text_input_default(
         theme: &iced::widget::Theme,
         status: iced::widget::text_input::Status,
     ) -> iced::widget::text_input::Style {
         let mut style = iced::widget::text_input::default(theme, status);
+        let clr = color!(0xccc2b3);
+        style.background = iced::Background::Color(clr);
+        style.border.color = clr;
+        style.value = color!(0x000000);
+        style
+    }
+
+    fn command_palette_text_input_with_results(
+        theme: &iced::widget::Theme,
+        status: iced::widget::text_input::Status,
+    ) -> iced::widget::text_input::Style {
+        let mut style = Self::command_palette_text_input_default(theme, status);
         style.border.radius.top_right = 5.0;
         style.border.radius.top_left = 5.0;
         style.border.radius.bottom_right = 0.0;
@@ -646,13 +682,36 @@ impl AppStyle {
         theme: &iced::widget::Theme,
         status: iced::widget::text_input::Status,
     ) -> iced::widget::text_input::Style {
-        let mut style = iced::widget::text_input::default(theme, status);
+        let mut style = Self::command_palette_text_input_default(theme, status);
         style.border.radius.top_right = 5.0;
         style.border.radius.top_left = 5.0;
         style.border.radius.bottom_right = 5.0;
         style.border.radius.bottom_left = 5.0;
         style
     }
+}
+
+fn make_gradient(clr1: iced::Color, clr2: iced::Color, angle_radians: f32) -> iced::Gradient {
+    let linear = iced::gradient::Linear {
+        angle: iced::Radians(angle_radians),
+        stops: [
+            Some(iced::gradient::ColorStop {
+                offset: 0 as f32,
+                color: clr1,
+            }),
+            Some(iced::gradient::ColorStop {
+                offset: 1 as f32,
+                color: clr2,
+            }),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ],
+    };
+    iced::Gradient::Linear(linear)
 }
 
 struct CommandPalette {
