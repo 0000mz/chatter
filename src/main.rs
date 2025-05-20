@@ -664,7 +664,12 @@ impl CommandPalette {
         self.selected_index = index;
         if index >= 0 {
             if let Some(q) = self.current_action.get(index as usize) {
-                self.query = format!("{}: ", q);
+                // If the query already contains the action and also has arguments,
+                // do not override the query.
+                let parts = self.query.splitn(2, ":").collect::<Vec<_>>();
+                if parts.len() < 2 {
+                    self.query = format!("{}: ", q);
+                }
             }
             iced::widget::text_input::move_cursor_to_end("command-palette-input")
         } else {
