@@ -641,7 +641,7 @@ impl CommandPalette {
         }
         self.current_action = current_actions;
         self.current_action_arg = if parts.len() == 2 {
-            String::from(parts[1])
+            String::from(parts[1].trim())
         } else {
             String::new()
         };
