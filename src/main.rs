@@ -72,6 +72,8 @@ struct ChatInstance {
     // Abort the stream that handles the websocket communication for this
     // chat instance.
     abort_stream: Option<iced::task::Handle>,
+    broadcaster_name: Option<String>,
+    broadcaster_id: Option<String>,
 }
 
 struct StreamChat {
@@ -83,8 +85,6 @@ struct StreamChat {
     input_message: String,
     api_config: Option<ApiConfig>,
     app_config: Option<AppConfig>,
-    broadcaster_id: Option<String>,
-    broadcaster_name: Option<String>,
     user_id: Option<String>,
     command_palette_ctx: CommandPalette,
 }
@@ -102,8 +102,6 @@ impl StreamChat {
             input_message: String::new(),
             api_config: None,
             app_config: None,
-            broadcaster_id: None,
-            broadcaster_name: None,
             user_id: None,
             command_palette_ctx: CommandPalette::new(),
         }
@@ -117,8 +115,8 @@ impl StreamChat {
     }
 
     fn title(&self) -> String {
-        if let Some(broadcaster_name) = self.broadcaster_name.as_ref() {
-            format!("StreamChat - [{}]", broadcaster_name)
+        if !self.active_chat_instance.is_empty() {
+            format!("StreamChat - [{}]", self.active_chat_instance)
         } else {
             String::from("StreamChat - [unnamed]")
         }
@@ -146,7 +144,10 @@ impl StreamChat {
                     let new_instance = ChatInstance {
                         active_messages: VecDeque::new(),
                         abort_stream: None,
+                        broadcaster_id: None,
+                        broadcaster_name: None,
                     };
+                    println!("Inserting new chat instance: {}", stream_name);
                     self.chat_instances
                         .insert(stream_name.clone(), new_instance);
 
@@ -193,7 +194,7 @@ impl StreamChat {
                     iced::Task::none()
                 }
                 ChatStreamMessage::MessagePost(message) => {
-                    match self.chat_instances.get_mut(&self.active_chat_instance) {
+                    match self.chat_instances.get_mut(&message.broadcaster_name) {
                         Some(instance) => {
                             instance.active_messages.push_back(message);
                             // TODO: Optimize, do not remove one by one...
@@ -211,9 +212,16 @@ impl StreamChat {
                     iced::Task::none()
                 }
                 ChatStreamMessage::SaveBroadcasterInfo(broadcaster_id, broadcaster_name) => {
-                    self.broadcaster_id = Some(broadcaster_id);
-                    self.broadcaster_name = Some(broadcaster_name);
-                    iced::Task::none()
+                    if let Some(chat_instance) = self.chat_instances.get_mut(&broadcaster_name) {
+                        chat_instance.broadcaster_id = Some(broadcaster_id);
+                        chat_instance.broadcaster_name = Some(broadcaster_name);
+                        iced::Task::none()
+                    } else {
+                        iced::Task::done(Message::HandleError(format!(
+                            "Cannot save broadcast info for broascaster: {}",
+                            broadcaster_name
+                        )))
+                    }
                 }
                 ChatStreamMessage::MessageStreamInitState(stream_init_success) => {
                     self.subscribed_to_message_stream = stream_init_success;
@@ -262,26 +270,35 @@ impl StreamChat {
                     let api_config = self.api_config.as_ref().unwrap().clone();
                     let app_config = self.app_config.as_ref().unwrap().clone();
 
-                    if let (Some(broadcaster_id), Some(user_id)) =
-                        (self.broadcaster_id.as_ref(), self.user_id.as_ref())
-                    {
-                        let broadcaster_id = broadcaster_id.clone();
-                        let user_id = user_id.clone();
-                        iced::Task::perform(
-                            (|| async move {
-                                twitch_send_message(
-                                    broadcaster_id.clone(),
-                                    user_id.clone(),
-                                    api_config,
-                                    app_config,
-                                    message,
-                                )
-                                .await;
-                            })(),
-                            Message::Nothing,
-                        )
+                    if let Some(instance) = self.chat_instances.get(&self.active_chat_instance) {
+                        if let (Some(broadcaster_id), Some(user_id)) =
+                            (instance.broadcaster_id.as_ref(), self.user_id.as_ref())
+                        {
+                            let broadcaster_id = broadcaster_id.clone();
+                            let user_id = user_id.clone();
+                            iced::Task::perform(
+                                (|| async move {
+                                    twitch_send_message(
+                                        broadcaster_id.clone(),
+                                        user_id.clone(),
+                                        api_config,
+                                        app_config,
+                                        message,
+                                    )
+                                    .await;
+                                })(),
+                                Message::Nothing,
+                            )
+                        } else {
+                            eprintln!(
+                                "Not sending message.. no broadcaster/user id found in state..."
+                            );
+                            iced::Task::none()
+                        }
                     } else {
-                        eprintln!("Not sending message.. no broadcaster/user id found in state...");
+                        eprintln!(
+                            "Not sending message.. no instance for active stream found in state..."
+                        );
                         iced::Task::none()
                     }
                 }
@@ -410,24 +427,34 @@ impl StreamChat {
         }
 
         let stream_tab_line_height = 30;
-        let stream_tab = |stream_name| {
-            iced::widget::container(iced::widget::text(stream_name).line_height(
+        let stream_tab = |stream_name, active| {
+            let mut tab = iced::widget::container(iced::widget::text(stream_name).line_height(
                 iced::widget::text::LineHeight::Absolute(iced::Pixels(
                     stream_tab_line_height as f32,
                 )),
             ))
-            .style(|_theme| {
-                // TODO: reused style -- Add this to some global theme.
-                let outline_color = color!(0x4828ad);
-                iced::widget::container::background(outline_color)
-            })
-            .padding([0, 10])
+            .padding([0, 10]);
+            if active {
+                tab = tab.style(|_theme| {
+                    // TODO: reused style -- Add this to some global theme.
+                    let outline_color = color!(0x4828ad);
+                    iced::widget::container::background(outline_color)
+                });
+            } else {
+                tab = tab.style(|_theme| {
+                    let outline_color = color!(0x402599);
+                    iced::widget::container::background(outline_color)
+                });
+            }
+
+            tab
         };
 
         let mut stream_tab_row = row![];
-        // TODO: Make a tab for all of the open streams, not just the active one.
-        if let Some(stream_name) = self.broadcaster_name.as_ref() {
-            stream_tab_row = stream_tab_row.push(stream_tab(stream_name));
+        for (stream_name, _) in &self.chat_instances {
+            // TODO: When an inactive tab is clicked on, switch to that tab.
+            let active_tab = &self.active_chat_instance == stream_name;
+            stream_tab_row = stream_tab_row.push(stream_tab(stream_name, active_tab));
         }
 
         let base_ui = column![
@@ -720,7 +747,6 @@ fn subscribe_to_chat_stream(url: String) -> impl iced::task::Straw<(), ChatStrea
             loop {
                 let user_message = stream.next_message().await;
                 if let Some(user_message) = user_message {
-                    // output.send(Message::MessagePost(user_message)).await;
                     output
                         .send(ChatStreamMessage::MessagePost(user_message))
                         .await;
@@ -764,10 +790,14 @@ impl CsvMessageStream {
                 panic!("Expected each entry to have 3 parts: line=\"{}\"", line);
             }
             let duration_sec = parts[2].parse().expect("Expected number.");
+            let broadcast_id = String::from("placeholder_id");
+            let broadcaster_name = String::from("placeholder_name");
             user_messages.push(UserMessage::new(
                 parts[0], // username as user id
                 parts[0],
                 parts[1],
+                broadcast_id.as_ref(),
+                broadcaster_name.as_ref(),
                 timestamp_fn(duration_sec),
             ));
         }
@@ -904,15 +934,26 @@ struct UserMessage {
     user_id: String,
     username: String,
     message: String,
+    broadcast_id: String,
+    broadcaster_name: String,
     timestamp: std::time::Instant,
 }
 
 impl UserMessage {
-    fn new(user_id: &str, username: &str, message: &str, timestamp: std::time::Instant) -> Self {
+    fn new(
+        user_id: &str,
+        username: &str,
+        message: &str,
+        broadcast_id: &str,
+        broadcaster_name: &str,
+        timestamp: std::time::Instant,
+    ) -> Self {
         UserMessage {
             user_id: user_id.into(),
             username: username.into(),
             message: message.into(),
+            broadcast_id: broadcast_id.into(),
+            broadcaster_name: broadcaster_name.into(),
             timestamp,
         }
     }
@@ -1208,6 +1249,12 @@ async fn auth_twitch_chat_event_sub(
                         let chatter_user_id = event_data
                             .and_then(|value| value.get("chatter_user_id"))
                             .and_then(|value| value.as_str());
+                        let broadcaster_user_id = event_data
+                            .and_then(|value| value.get("broadcaster_user_id"))
+                            .and_then(|value| value.as_str());
+                        let broadcaster_user_name = event_data
+                            .and_then(|value| value.get("broadcaster_user_name"))
+                            .and_then(|value| value.as_str());
                         // TODO: There is also a message.fragments field that
                         // partitions the message into its message, emote and mention components.
                         let chatter_message = event_data
@@ -1219,13 +1266,23 @@ async fn auth_twitch_chat_event_sub(
                             Some(chatter_username),
                             Some(chatter_user_id),
                             Some(chatter_message),
-                        ) = (chatter_username, chatter_user_id, chatter_message)
-                        {
+                            Some(broadcaster_user_id),
+                            Some(broadcaster_user_name),
+                        ) = (
+                            chatter_username,
+                            chatter_user_id,
+                            chatter_message,
+                            broadcaster_user_id,
+                            broadcaster_user_name,
+                        ) {
+                            let broadcaster_user_name = broadcaster_user_name.to_lowercase();
                             if let Err(_) = tx
                                 .send(UserMessage {
                                     user_id: String::from(chatter_user_id),
                                     username: String::from(chatter_username),
                                     message: String::from(chatter_message),
+                                    broadcast_id: String::from(broadcaster_user_id),
+                                    broadcaster_name: broadcaster_user_name,
                                     timestamp: std::time::Instant::now(), // TODO: parse the timestamp from the payload...
                                 })
                                 .await
