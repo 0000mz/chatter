@@ -47,6 +47,9 @@ enum Message {
     // action name and the second part are the arguments passed
     // to the action to be processed.
     CommandPaletteHandleAction(String, Option<Vec<String>>),
+    // Selects the option at the given index of the command palette action
+    // list.
+    CommandPaletteHighlightActionIndex(i32),
     // Received when the ESC key is pressed. What should happen depends
     // entirely on the current state of the application.
     // i.e. if the current focus is the command palette, then exit it.
@@ -315,12 +318,16 @@ impl StreamChat {
                         if next_index >= self.command_palette_ctx.current_action.len() as i32 {
                             next_index = self.command_palette_ctx.current_action.len() as i32 - 1;
                         }
-                        self.command_palette_ctx.selected_index = next_index;
+                        iced::Task::done(Message::CommandPaletteHighlightActionIndex(next_index))
+                    } else {
+                        iced::Task::none()
                     }
-                    iced::Task::none()
                 }
                 _ => iced::Task::none(),
             },
+            Message::CommandPaletteHighlightActionIndex(index) => {
+                self.command_palette_ctx.update_selected_query(index)
+            }
             Message::CommandPaletteHandleAction(action, args) => {
                 println!(
                     "DBG command palette: handle action = {}, arg = {:?}",
@@ -611,6 +618,27 @@ impl CommandPalette {
                     Some(vec![self.current_action_arg.clone()])
                 },
             ))
+        }
+    }
+
+    // Updates the query to the action at the given `index`.
+    // The query will be updated to contain the full text of the selected action
+    // if it is not fully typed out in the command palette text input.
+    fn update_selected_query(&mut self, index: i32) -> iced::Task<Message> {
+        let mut index = index;
+        if index < -1 {
+            index = -1;
+        } else if index >= self.current_action.len() as i32 {
+            index = self.current_action.len() as i32 - 1;
+        }
+        self.selected_index = index;
+        if index >= 0 {
+            if let Some(q) = self.current_action.get(index as usize) {
+                self.query = format!("{}: ", q);
+            }
+            iced::widget::text_input::move_cursor_to_end("command-palette-input")
+        } else {
+            iced::Task::none()
         }
     }
 
