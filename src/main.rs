@@ -19,7 +19,7 @@ fn main() -> iced::Result {
 enum ChatStreamMessage {
     InitializeChatError(String),
     // TODO: Use a struct instead of a tuple so that the fields are named.
-    SaveBroadcasterInfo(String, String),
+    SaveBroadcasterInfo(String, String, tokio_util::sync::CancellationToken),
     SaveUserId(String),
     // If bool is true, then the stream has been initialized in the
     // subscription successfully.
@@ -31,6 +31,7 @@ enum ChatStreamMessage {
 enum Message {
     InitializeApp,
     OpenChatStream(String),
+    CloseActiveChatStream,
     ChatStreamError(Result<(), String>),
     UpdateAppConfig(Option<(ApiConfig, AppConfig)>),
     HandleChatStreamOutput(ChatStreamMessage),
@@ -70,9 +71,13 @@ impl std::fmt::Debug for Message {
 
 struct ChatInstance {
     active_messages: VecDeque<UserMessage>,
-    // Abort the stream that handles the websocket communication for this
-    // chat instance.
+    // Aborts the iced task that handles the read from the straw sipper.
+    // Different from `cancel_task`, which controls the actual tokio async
+    // operation.
     abort_stream: Option<iced::task::Handle>,
+    // Cancellation token that will cancel the tokio stream used to read
+    // the websocket stream.
+    cancel_task: Option<tokio_util::sync::CancellationToken>,
     broadcaster_name: Option<String>,
     broadcaster_id: Option<String>,
 }
@@ -135,6 +140,32 @@ impl StreamChat {
                 ),
                 iced::Task::done(Message::FocusChatArea),
             ]),
+            Message::CloseActiveChatStream => {
+                if self.chat_instances.contains_key(&self.active_chat_instance) {
+                    let instance = self.chat_instances.get(&self.active_chat_instance).unwrap();
+                    if let Some(cancel_task) = instance.cancel_task.as_ref() {
+                        cancel_task.cancel();
+                    } else {
+                        eprintln!(
+                            "CloseActiveChatStream: No cancellation token found for stream being closed..."
+                        );
+                    }
+                    self.chat_instances.remove(&self.active_chat_instance);
+                }
+
+                // Find a different tab to set as active.
+                let mut found_new_instance = false;
+                if !self.chat_instances.is_empty() {
+                    if let Some((stream_name, _)) = self.chat_instances.iter().next() {
+                        self.active_chat_instance = stream_name.clone();
+                        found_new_instance = true;
+                    }
+                }
+                if !found_new_instance {
+                    self.active_chat_instance = String::new();
+                }
+                iced::Task::none()
+            }
             Message::OpenChatStream(stream_name) => {
                 println!("Opening chat stream: {}", stream_name);
 
@@ -145,6 +176,7 @@ impl StreamChat {
                     let new_instance = ChatInstance {
                         active_messages: VecDeque::new(),
                         abort_stream: None,
+                        cancel_task: None,
                         broadcaster_id: None,
                         broadcaster_name: None,
                     };
@@ -162,7 +194,6 @@ impl StreamChat {
                         )
                         .abortable();
                         instance.abort_stream = Some(handle);
-
                         self.active_chat_instance = stream_name;
                         task
                     } else {
@@ -212,10 +243,15 @@ impl StreamChat {
                     }
                     iced::Task::none()
                 }
-                ChatStreamMessage::SaveBroadcasterInfo(broadcaster_id, broadcaster_name) => {
+                ChatStreamMessage::SaveBroadcasterInfo(
+                    broadcaster_id,
+                    broadcaster_name,
+                    cancel_token,
+                ) => {
                     if let Some(chat_instance) = self.chat_instances.get_mut(&broadcaster_name) {
                         chat_instance.broadcaster_id = Some(broadcaster_id);
                         chat_instance.broadcaster_name = Some(broadcaster_name);
+                        chat_instance.cancel_task = Some(cancel_token);
                         iced::Task::none()
                     } else {
                         iced::Task::done(Message::HandleError(format!(
@@ -395,6 +431,9 @@ impl StreamChat {
                             true,
                             Some(String::from("open stream: ")),
                         ))
+                    }
+                    (iced::keyboard::Key::Character("w"), iced::keyboard::Modifiers::CTRL) => {
+                        Some(Message::CloseActiveChatStream)
                     }
                     _ => None,
                 });
@@ -725,9 +764,7 @@ impl CommandPalette {
     }
 }
 
-async fn create_message_stream_initializer(
-    url: &str,
-) -> std::result::Result<Box<dyn MessageStream>, String> {
+async fn create_message_stream(url: &str) -> std::result::Result<Box<dyn MessageStream>, String> {
     let url_parts = url.splitn(2, "://").collect::<Vec<_>>();
     if url_parts.len() != 2 {
         return Err(String::from("Invalid url, no protocol found."));
@@ -743,21 +780,30 @@ async fn create_message_stream_initializer(
 
 fn subscribe_to_chat_stream(url: String) -> impl iced::task::Straw<(), ChatStreamMessage, String> {
     iced::task::sipper(async move |mut output| {
-        let stream = create_message_stream_initializer(url.as_str()).await;
+        let stream = create_message_stream(url.as_str()).await;
         if let Err(e) = stream {
             // TODO: Return the error instead of emitting the error message...
             output.send(ChatStreamMessage::InitializeChatError(e)).await;
         } else if let Ok(mut stream) = stream {
-            if let Some((broadcaster_id, broadcaster_name, user_id)) =
+            if let Some((broadcaster_id, broadcaster_name, user_id, cancel_token)) =
                 stream.get_broadcaster_and_user_id()
             {
-                output
-                    .send(ChatStreamMessage::SaveBroadcasterInfo(
-                        broadcaster_id,
-                        broadcaster_name,
-                    ))
-                    .await;
-                output.send(ChatStreamMessage::SaveUserId(user_id)).await;
+                if let Some(cancel_token) = cancel_token {
+                    output
+                        .send(ChatStreamMessage::SaveBroadcasterInfo(
+                            broadcaster_id,
+                            broadcaster_name,
+                            cancel_token,
+                        ))
+                        .await;
+                    output.send(ChatStreamMessage::SaveUserId(user_id)).await;
+                } else {
+                    output
+                        .send(ChatStreamMessage::InitializeChatError(String::from(
+                            "Failed to get cancellation token.",
+                        )))
+                        .await;
+                }
             }
             output
                 .send(ChatStreamMessage::MessageStreamInitState(true))
@@ -779,7 +825,14 @@ fn subscribe_to_chat_stream(url: String) -> impl iced::task::Straw<(), ChatStrea
 #[async_trait]
 trait MessageStream: Send + Sync {
     async fn next_message(&mut self) -> Option<UserMessage>;
-    fn get_broadcaster_and_user_id(&self) -> Option<(String, String, String)>;
+    fn get_broadcaster_and_user_id(
+        &self,
+    ) -> Option<(
+        String,
+        String,
+        String,
+        Option<tokio_util::sync::CancellationToken>,
+    )>;
 }
 
 struct CsvMessageStream {
@@ -827,7 +880,14 @@ impl CsvMessageStream {
 
 #[async_trait]
 impl MessageStream for CsvMessageStream {
-    fn get_broadcaster_and_user_id(&self) -> Option<(String, String, String)> {
+    fn get_broadcaster_and_user_id(
+        &self,
+    ) -> Option<(
+        String,
+        String,
+        String,
+        Option<tokio_util::sync::CancellationToken>,
+    )> {
         None
     }
 
@@ -850,6 +910,9 @@ impl MessageStream for CsvMessageStream {
 struct TwitchMessageStream {
     stream_name: String,
     message_stream_received: Option<tokio::sync::mpsc::Receiver<UserMessage>>,
+    // Token used to cancel the stream that processes the messages from the
+    // stream connection.
+    cancel_task: Option<tokio_util::sync::CancellationToken>,
     user_id: String,
     broadcaster_id: String,
 }
@@ -870,28 +933,35 @@ impl TwitchMessageStream {
 
         println!("Twitch:Broadcaster ID: {}", broadcaster_id);
         println!("Twitch:User ID: {}", user_id);
-        let stream_rx = match setup_twitch_oauth(
+        let stream_conn = setup_twitch_oauth(
             &api_config,
             &app_config,
             broadcaster_id.as_str(),
             user_id.as_str(),
         )
-        .await
-        {
-            Err(twitch_auth_err) => {
-                eprintln!("error: {}", twitch_auth_err);
-                None
+        .await;
+        if stream_conn.is_err() {
+            let err = stream_conn.err().unwrap();
+            eprintln!(
+                "Failed to receive stream receiver or cancellation token..: {}",
+                err
+            );
+            TwitchMessageStream {
+                stream_name: String::from(stream),
+                message_stream_received: None,
+                cancel_task: None,
+                user_id: String::new(),
+                broadcaster_id: String::new(),
             }
-            Ok(message_stream_receiver) => message_stream_receiver,
-        };
-        if stream_rx.is_none() {
-            eprintln!("No stream receiver returned during initialization...");
-        }
-        TwitchMessageStream {
-            stream_name: String::from(stream),
-            message_stream_received: stream_rx,
-            user_id,
-            broadcaster_id,
+        } else {
+            let (stream_rx, cancel_task) = stream_conn.unwrap().unwrap();
+            TwitchMessageStream {
+                stream_name: String::from(stream),
+                message_stream_received: Some(stream_rx),
+                cancel_task: Some(cancel_task),
+                user_id,
+                broadcaster_id,
+            }
         }
     }
 
@@ -931,11 +1001,19 @@ impl TwitchMessageStream {
 
 #[async_trait]
 impl MessageStream for TwitchMessageStream {
-    fn get_broadcaster_and_user_id(&self) -> Option<(String, String, String)> {
+    fn get_broadcaster_and_user_id(
+        &self,
+    ) -> Option<(
+        String,
+        String,
+        String,
+        Option<tokio_util::sync::CancellationToken>,
+    )> {
         Some((
             self.broadcaster_id.clone(),
             self.stream_name.clone(),
             self.user_id.clone(),
+            self.cancel_task.clone(),
         ))
     }
 
@@ -1129,7 +1207,13 @@ async fn setup_twitch_oauth(
     app_config: &AppConfig,
     broadcaster_id: &str,
     user_id: &str,
-) -> Result<Option<tokio::sync::mpsc::Receiver<UserMessage>>, reqwest::Error> {
+) -> Result<
+    Option<(
+        tokio::sync::mpsc::Receiver<UserMessage>,
+        tokio_util::sync::CancellationToken,
+    )>,
+    reqwest::Error,
+> {
     // Subscribe to the EventSub for receiving chat messages.
     println!("Attempting to subscribe to twitch chat event sub.");
     match auth_twitch_chat_event_sub(
@@ -1145,9 +1229,9 @@ async fn setup_twitch_oauth(
     )
     .await
     {
-        Ok(Some(rx)) => {
+        Ok(Some(result)) => {
             println!("auth_twitch_chat_event_sub: successful");
-            Ok(Some(rx))
+            Ok(Some(result))
         }
         Ok(None) => {
             println!("auth_twitch_chat_event_sub: failed..");
@@ -1165,7 +1249,13 @@ async fn auth_twitch_chat_event_sub(
     user_id: &str,
     client_id: &str,
     access_token: &str,
-) -> Result<Option<tokio::sync::mpsc::Receiver<UserMessage>>, reqwest::Error> {
+) -> Result<
+    Option<(
+        tokio::sync::mpsc::Receiver<UserMessage>,
+        tokio_util::sync::CancellationToken,
+    )>,
+    reqwest::Error,
+> {
     let twitch_ws_url = "wss://eventsub.wss.twitch.tv/ws";
 
     let (ws_stream, _) = tokio_tungstenite::connect_async(twitch_ws_url)
@@ -1243,85 +1333,105 @@ async fn auth_twitch_chat_event_sub(
 
     let (tx, rx) = tokio::sync::mpsc::channel::<UserMessage>(100);
 
-    // TODO: Use cancelation thread to control the read stream...
+    let token = tokio_util::sync::CancellationToken::new();
+    let cloned_token = token.clone();
     println!("Spawning task to read messages from stream...");
     tokio::spawn(async move {
-        let (log_chat_messages, log_payload_message) = (false, false);
-        loop {
-            match ws_enumerate.next().await {
-                Some((_, Ok(message))) => {
-                    if log_payload_message {
-                        println!("payload={}", message);
-                    }
+        tokio::select! {
+          _ = cloned_token.cancelled() => {
+          }
+          _ = twitch_process_websocket_event(tx, ws_enumerate) => {}
+        }
+    });
+    Ok(Some((rx, token)))
+}
 
-                    // Parse the message and chatter name.
-                    if let Ok(json_data) = serde_json::from_str::<serde_json::Value>(
-                        message.into_text().unwrap().as_str(),
+async fn twitch_process_websocket_event(
+    mpsc_sender: tokio::sync::mpsc::Sender<UserMessage>,
+    // websocket_enumerate: futures_util::stream::Enumerate<T>,
+    mut websocket_enumerate: futures_util::stream::Enumerate<
+        futures_util::stream::SplitStream<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+        >,
+    >,
+) {
+    let (log_chat_messages, log_payload_message) = (false, false);
+    loop {
+        println!("Twitch EventSubLoop: Waiting for next message...");
+        match websocket_enumerate.next().await {
+            Some((_, Ok(message))) => {
+                if log_payload_message {
+                    println!("payload={}", message);
+                }
+
+                // Parse the message and chatter name.
+                if let Ok(json_data) =
+                    serde_json::from_str::<serde_json::Value>(message.into_text().unwrap().as_str())
+                {
+                    let event_data = json_data
+                        .get("payload")
+                        .and_then(|value| value.get("event"));
+                    let chatter_username = event_data
+                        .and_then(|value| value.get("chatter_user_name"))
+                        .and_then(|value| value.as_str());
+                    let chatter_user_id = event_data
+                        .and_then(|value| value.get("chatter_user_id"))
+                        .and_then(|value| value.as_str());
+                    let broadcaster_user_id = event_data
+                        .and_then(|value| value.get("broadcaster_user_id"))
+                        .and_then(|value| value.as_str());
+                    let broadcaster_user_name = event_data
+                        .and_then(|value| value.get("broadcaster_user_name"))
+                        .and_then(|value| value.as_str());
+                    // TODO: There is also a message.fragments field that
+                    // partitions the message into its message, emote and mention components.
+                    let chatter_message = event_data
+                        .and_then(|value| value.get("message"))
+                        .and_then(|value| value.get("text"))
+                        .and_then(|value| value.as_str());
+
+                    if let (
+                        Some(chatter_username),
+                        Some(chatter_user_id),
+                        Some(chatter_message),
+                        Some(broadcaster_user_id),
+                        Some(broadcaster_user_name),
+                    ) = (
+                        chatter_username,
+                        chatter_user_id,
+                        chatter_message,
+                        broadcaster_user_id,
+                        broadcaster_user_name,
                     ) {
-                        let event_data = json_data
-                            .get("payload")
-                            .and_then(|value| value.get("event"));
-                        let chatter_username = event_data
-                            .and_then(|value| value.get("chatter_user_name"))
-                            .and_then(|value| value.as_str());
-                        let chatter_user_id = event_data
-                            .and_then(|value| value.get("chatter_user_id"))
-                            .and_then(|value| value.as_str());
-                        let broadcaster_user_id = event_data
-                            .and_then(|value| value.get("broadcaster_user_id"))
-                            .and_then(|value| value.as_str());
-                        let broadcaster_user_name = event_data
-                            .and_then(|value| value.get("broadcaster_user_name"))
-                            .and_then(|value| value.as_str());
-                        // TODO: There is also a message.fragments field that
-                        // partitions the message into its message, emote and mention components.
-                        let chatter_message = event_data
-                            .and_then(|value| value.get("message"))
-                            .and_then(|value| value.get("text"))
-                            .and_then(|value| value.as_str());
-
-                        if let (
-                            Some(chatter_username),
-                            Some(chatter_user_id),
-                            Some(chatter_message),
-                            Some(broadcaster_user_id),
-                            Some(broadcaster_user_name),
-                        ) = (
-                            chatter_username,
-                            chatter_user_id,
-                            chatter_message,
-                            broadcaster_user_id,
-                            broadcaster_user_name,
-                        ) {
-                            let broadcaster_user_name = broadcaster_user_name.to_lowercase();
-                            if let Err(_) = tx
-                                .send(UserMessage {
-                                    user_id: String::from(chatter_user_id),
-                                    username: String::from(chatter_username),
-                                    message: String::from(chatter_message),
-                                    broadcast_id: String::from(broadcaster_user_id),
-                                    broadcaster_name: broadcaster_user_name,
-                                    timestamp: std::time::Instant::now(), // TODO: parse the timestamp from the payload...
-                                })
-                                .await
-                            {
-                                eprintln!("Failed to send chatter message to mpsc.");
-                            }
-                            if log_chat_messages {
-                                println!("-> {}: {}", chatter_username, chatter_message);
-                            }
+                        let broadcaster_user_name = broadcaster_user_name.to_lowercase();
+                        if let Err(_) = mpsc_sender
+                            .send(UserMessage {
+                                user_id: String::from(chatter_user_id),
+                                username: String::from(chatter_username),
+                                message: String::from(chatter_message),
+                                broadcast_id: String::from(broadcaster_user_id),
+                                broadcaster_name: broadcaster_user_name,
+                                timestamp: std::time::Instant::now(), // TODO: parse the timestamp from the payload...
+                            })
+                            .await
+                        {
+                            eprintln!("Failed to send chatter message to mpsc.");
+                        }
+                        if log_chat_messages {
+                            println!("-> {}: {}", chatter_username, chatter_message);
                         }
                     }
                 }
-                _ => {
-                    eprintln!("Could not get next message from websocket... exiting read loop.");
-                    break;
-                }
+            }
+            _ => {
+                eprintln!("Could not get next message from websocket... exiting read loop.");
+                break;
             }
         }
-        println!("Exiting weboscket task.");
-    });
-    Ok(Some(rx))
+    }
+    println!("Exiting weboscket task.");
 }
 
 // If user_name is None, it will get the user id for the current oauth token.

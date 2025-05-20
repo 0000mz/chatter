@@ -3627,6 +3627,7 @@ name = "streamchat"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures-util",
  "iced",
  "open",
  "reqwest",
@@ -3636,6 +3637,7 @@ dependencies = [
  "serde_millis",
  "tokio",
  "tokio-tungstenite",
+ "tokio-util",
  "toml",
  "urlencoding",
  "uuid",
