@@ -1348,7 +1348,6 @@ async fn auth_twitch_chat_event_sub(
 
 async fn twitch_process_websocket_event(
     mpsc_sender: tokio::sync::mpsc::Sender<UserMessage>,
-    // websocket_enumerate: futures_util::stream::Enumerate<T>,
     mut websocket_enumerate: futures_util::stream::Enumerate<
         futures_util::stream::SplitStream<
             tokio_tungstenite::WebSocketStream<
