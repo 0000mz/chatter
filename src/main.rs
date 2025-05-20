@@ -39,7 +39,8 @@ enum Message {
     HandleError(String),
     // If true, the command palette will be set to active.
     // Otherwise, it will be set to inactive.
-    CommandPaletteToggle(bool),
+    // If true, the arg[1] will be set to the starting query string.
+    CommandPaletteToggle(bool, Option<String>),
     CommandPaletteSearchChanged(String),
     // Selects the currently selected command palette option.
     CommandPaletteSelect,
@@ -255,7 +256,7 @@ impl StreamChat {
             Message::CommandPaletteSelect => match self.command_palette_ctx.maybe_select() {
                 Some(msg) => iced::Task::batch([
                     iced::Task::done(msg),
-                    iced::Task::done(Message::CommandPaletteToggle(false)),
+                    iced::Task::done(Message::CommandPaletteToggle(false, None)),
                 ]),
                 None => iced::Task::none(),
             },
@@ -303,9 +304,13 @@ impl StreamChat {
                     }
                 }
             }
-            Message::CommandPaletteToggle(enable_command_palette) => {
+            Message::CommandPaletteToggle(enable_command_palette, starting_query) => {
                 self.command_palette_ctx.active = enable_command_palette;
                 if enable_command_palette {
+                    if let Some(starting_query) = starting_query {
+                        self.command_palette_ctx
+                            .update_current_from_query(starting_query);
+                    }
                     iced::widget::text_input::focus("command-palette-input")
                 } else {
                     self.command_palette_ctx
@@ -316,7 +321,7 @@ impl StreamChat {
             Message::FocusChatArea => iced::widget::text_input::focus("chat-message-input"),
             Message::HandleSpecialKey(key) => match key {
                 iced::keyboard::key::Named::Escape => {
-                    iced::Task::done(Message::CommandPaletteToggle(false))
+                    iced::Task::done(Message::CommandPaletteToggle(false, None))
                 }
                 arrow @ iced::keyboard::key::Named::ArrowUp
                 | arrow @ iced::keyboard::key::Named::ArrowDown
@@ -347,6 +352,7 @@ impl StreamChat {
             Message::CommandPaletteHandleAction(action, args) => {
                 match action.as_str() {
                     "quit" => iced::Task::done(Message::Terminate),
+                    // TODO: bind these action strings to some searchable symbol.
                     "open stream" => {
                         match args {
                             Some(args) => {
@@ -381,7 +387,14 @@ impl StreamChat {
                         Some(Message::HandleSpecialKey(k))
                     }
                     (iced::keyboard::Key::Character("p"), iced::keyboard::Modifiers::CTRL) => {
-                        Some(Message::CommandPaletteToggle(true))
+                        Some(Message::CommandPaletteToggle(true, None))
+                    }
+                    (iced::keyboard::Key::Character("t"), iced::keyboard::Modifiers::CTRL)
+                    | (iced::keyboard::Key::Character("n"), iced::keyboard::Modifiers::CTRL) => {
+                        Some(Message::CommandPaletteToggle(
+                            true,
+                            Some(String::from("open stream: ")),
+                        ))
                     }
                     _ => None,
                 });
