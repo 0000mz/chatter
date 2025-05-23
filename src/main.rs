@@ -432,8 +432,13 @@ impl StreamChat {
                     (iced::keyboard::Key::Character("p"), iced::keyboard::Modifiers::CTRL) => {
                         Some(Message::CommandPaletteToggle(true, None))
                     }
-                    (iced::keyboard::Key::Character("t"), iced::keyboard::Modifiers::CTRL)
-                    | (iced::keyboard::Key::Character("n"), iced::keyboard::Modifiers::CTRL) => {
+                    // TODO: Fix -- mapping to LOGO does not restrict the keys from being sent
+                    // to the focused input.
+                    (iced::keyboard::Key::Character("t"), iced::keyboard::Modifiers::LOGO)
+                    | (iced::keyboard::Key::Character("n"), iced::keyboard::Modifiers::LOGO)
+                    | (iced::keyboard::Key::Character("t"), iced::keyboard::Modifiers::CTRL)
+                    | (iced::keyboard::Key::Character("n"), iced::keyboard::Modifiers::CTRL)
+                    => {
                         Some(Message::CommandPaletteToggle(
                             true,
                             Some(String::from("open stream: ")),
