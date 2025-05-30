@@ -421,7 +421,7 @@ impl StreamChat {
 
     fn subscription(&self) -> iced::Subscription<Message> {
         if let (Some(_), Some(_)) = (&self.api_config, &self.app_config) {
-            let keypress_sub =
+            let keyrelease_sub =
                 iced::keyboard::on_key_release(|key, mods| match (key.as_ref(), mods) {
                     (iced::keyboard::Key::Named(k @ iced::keyboard::key::Named::Escape), _)
                     | (iced::keyboard::Key::Named(k @ iced::keyboard::key::Named::ArrowUp), _)
@@ -429,7 +429,10 @@ impl StreamChat {
                     | (iced::keyboard::Key::Named(k @ iced::keyboard::key::Named::Tab), _) => {
                         Some(Message::HandleSpecialKey(k))
                     }
-                    (iced::keyboard::Key::Character("p"), iced::keyboard::Modifiers::CTRL) => {
+                    // TODO: Fix -- if focus is within an input, the command+P keybind will still
+                    // output the p to the current input before evaluating the task generated here.
+                    (iced::keyboard::Key::Character("p"), iced::keyboard::Modifiers::CTRL)
+                    | (iced::keyboard::Key::Character("p"), iced::keyboard::Modifiers::COMMAND) => {
                         Some(Message::CommandPaletteToggle(true, None))
                     }
                     // TODO: Fix -- mapping to LOGO does not restrict the keys from being sent
@@ -437,20 +440,20 @@ impl StreamChat {
                     (iced::keyboard::Key::Character("t"), iced::keyboard::Modifiers::LOGO)
                     | (iced::keyboard::Key::Character("n"), iced::keyboard::Modifiers::LOGO)
                     | (iced::keyboard::Key::Character("t"), iced::keyboard::Modifiers::CTRL)
-                    | (iced::keyboard::Key::Character("n"), iced::keyboard::Modifiers::CTRL)
-                    => {
+                    | (iced::keyboard::Key::Character("n"), iced::keyboard::Modifiers::CTRL) => {
                         Some(Message::CommandPaletteToggle(
                             true,
                             Some(String::from("open stream: ")),
                         ))
                     }
-                    (iced::keyboard::Key::Character("w"), iced::keyboard::Modifiers::CTRL) => {
+                    (iced::keyboard::Key::Character("w"), iced::keyboard::Modifiers::CTRL)
+                    | (iced::keyboard::Key::Character("w"), iced::keyboard::Modifiers::COMMAND) => {
                         Some(Message::CloseActiveChatStream)
                     }
                     _ => None,
                 });
             // TODO: No need to batch this since it's only one subscription.
-            iced::Subscription::batch([keypress_sub])
+            iced::Subscription::batch([keyrelease_sub])
         } else {
             iced::Subscription::none()
         }
@@ -1430,7 +1433,7 @@ async fn twitch_process_websocket_event(
 ) {
     let (log_chat_messages, log_payload_message) = (false, false);
     loop {
-        println!("Twitch EventSubLoop: Waiting for next message...");
+        // println!("Twitch EventSubLoop: Waiting for next message...");
         match websocket_enumerate.next().await {
             Some((_, Ok(message))) => {
                 if log_payload_message {
