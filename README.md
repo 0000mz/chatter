@@ -1,6 +1,3 @@
-- Running against a csv file: `cargo run -- file://data/chat1.txt`
-- Running against a twitch stream: `cargo run -- twitch://<twitch_username>` i.e. `cargo run -- twitch://northernlion`
-
 ## Twitch Config
 To configure twitch:
 1. Create a dev account and acquire the client id and secret.
@@ -31,7 +28,7 @@ cargo install --git https://github.com/mstange/samply.git samply
 RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release
 
 # Run app while recording profile
-samply record target/release/streamchat "twitch://northernlion"
+samply record target/release/streamchat
 ```
 
 ## TODO
@@ -39,3 +36,6 @@ samply record target/release/streamchat "twitch://northernlion"
 - When user scrolls up in the chat, do not append new messages. This should prevent the chat moving away when
   trying to read some previous message.
 - The text input should be multiline so that long messages are still visible.
+- Twitch: You can create a maximum of 3 WebSockets connections with enabled subscriptions. Reconnecting using a reconnection URL (see Reconnect message) doesn’t add to your WebSocket count.
+  - Implement chat caching that will temp disconnect from inactive tabs and reconnect to them when
+    they are refocused. (https://dev.twitch.tv/docs/eventsub/handling-websocket-events/)

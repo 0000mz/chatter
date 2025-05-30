@@ -20,6 +20,9 @@ serde_millis = "0.1.1"
 uuid = { version = "1.16.0", features = ["v4"] }
 async-trait = "0.1.88"
 tokio-tungstenite = { version = "0.26.2", features = ["native-tls"] }
+tokio-util = "0.7.15"
+# Ensure futures-util is same version that is being used by other dependencies here.
+futures-util = "0.3.31"
 
 [profile.release]
 debug = 1
