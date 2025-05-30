@@ -1,3 +1,5 @@
+#![feature(vec_deque_truncate_front)]
+
 use async_trait::async_trait;
 use iced::futures::StreamExt;
 use iced::widget::{column, rich_text, row, span};
@@ -6,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
 use std::vec::Vec;
+
+const MAX_CHAT_MESSAGES: usize = 100;
 
 fn main() -> iced::Result {
     iced::application(StreamChat::boot, StreamChat::update, StreamChat::view)
@@ -59,6 +63,7 @@ enum Message {
     HandleSpecialKey(iced::keyboard::key::Named),
     // If this message is received, the focus should turn to the
     // current open chat area.
+    ChatViewportScroll(iced::widget::scrollable::AbsoluteOffset),
     FocusChatArea,
     Nothing(()),
     Terminate,
@@ -72,6 +77,7 @@ impl std::fmt::Debug for Message {
 
 struct ChatInstance {
     active_messages: VecDeque<UserMessage>,
+    frozen_messages: VecDeque<UserMessage>,
     // Aborts the iced task that handles the read from the straw sipper.
     // Different from `cancel_task`, which controls the actual tokio async
     // operation.
@@ -94,6 +100,9 @@ struct StreamChat {
     app_config: Option<AppConfig>,
     user_id: Option<String>,
     command_palette_ctx: CommandPalette,
+    // If chat_frozen is true, new messages will not be rendered to the
+    // chat output area.
+    chat_frozen: bool,
 }
 
 impl StreamChat {
@@ -111,6 +120,7 @@ impl StreamChat {
             app_config: None,
             user_id: None,
             command_palette_ctx: CommandPalette::new(),
+            chat_frozen: false,
         }
     }
 
@@ -176,6 +186,7 @@ impl StreamChat {
                 } else {
                     let new_instance = ChatInstance {
                         active_messages: VecDeque::new(),
+                        frozen_messages: VecDeque::new(),
                         abort_stream: None,
                         cancel_task: None,
                         broadcaster_id: None,
@@ -227,12 +238,15 @@ impl StreamChat {
                     iced::Task::none()
                 }
                 ChatStreamMessage::MessagePost(message) => {
-                    match self.chat_instances.get_mut(&message.broadcaster_name) {
+                    let chat_frozen = self.chat_frozen;
+                    match self.get_active_chat_instance_mut() {
                         Some(instance) => {
-                            instance.active_messages.push_back(message);
-                            // TODO: Optimize, do not remove one by one...
-                            while instance.active_messages.len() > 100 {
-                                instance.active_messages.pop_front();
+                            if chat_frozen {
+                                instance.frozen_messages.push_back(message);
+                                instance.frozen_messages.truncate_front(MAX_CHAT_MESSAGES);
+                            } else {
+                                instance.active_messages.push_back(message);
+                                instance.active_messages.truncate_front(MAX_CHAT_MESSAGES);
                             }
                         }
                         None => {
@@ -415,6 +429,28 @@ impl StreamChat {
                     ))),
                 }
             }
+            Message::ChatViewportScroll(offset) => {
+                let previously_frozen = self.chat_frozen;
+                self.chat_frozen = offset.y > 0 as f32;
+                if previously_frozen && !self.chat_frozen {
+                    // Flush the frozen messages into the active messages.
+                    match self.get_active_chat_instance_mut() {
+                        Some(instance) => {
+                            println!(
+                                "Unfreezing the chat: Attaching {} frozen messages to chat.",
+                                instance.frozen_messages.len()
+                            );
+                            instance
+                                .active_messages
+                                .append(&mut instance.frozen_messages);
+                            assert!(instance.frozen_messages.is_empty());
+                            instance.active_messages.truncate_front(MAX_CHAT_MESSAGES);
+                        }
+                        None => {}
+                    }
+                }
+                iced::Task::none()
+            }
             Message::Nothing(_) => iced::Task::none(),
         }
     }
@@ -532,6 +568,7 @@ impl StreamChat {
                         )));
                 style
             })
+            .on_scroll(|viewport| Message::ChatViewportScroll(viewport.absolute_offset()))
             .anchor_bottom();
 
         let base_ui = column![
@@ -633,6 +670,17 @@ impl StreamChat {
             results = results.push(entry);
         }
         results.into()
+    }
+
+    fn get_active_chat_instance_mut(&mut self) -> Option<&mut ChatInstance> {
+        if self.chat_instances.contains_key(&self.active_chat_instance) {
+            match self.chat_instances.get_mut(&self.active_chat_instance) {
+                Some(instance) => Some(instance),
+                None => None,
+            }
+        } else {
+            None
+        }
     }
 }
 
