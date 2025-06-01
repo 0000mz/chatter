@@ -1,4 +1,7 @@
+use std::collections::HashMap;
+
 use crate::app_util::{ApiConfig, AppConfig, AppData};
+use crate::stream::base::EmoteDatabase;
 use crate::stream::base::MessageStream;
 use crate::stream::base::UserMessage;
 
@@ -147,6 +150,7 @@ async fn get_user_id_from_name(
         .await?;
 
     if response.status() != reqwest::StatusCode::OK {
+        eprintln!("STATUS: {}", response.status());
         Ok(None)
     } else {
         #[derive(Deserialize)]
@@ -167,6 +171,7 @@ async fn get_user_id_from_name(
             eprintln!("No user id found in payload...");
             Ok(None)
         } else {
+            println!("Returning user id: {:?} -> {}", user_name, res.data[0].id);
             Ok(Some(res.data[0].id.clone()))
         }
     }
@@ -510,4 +515,138 @@ pub async fn send_message(
         .unwrap();
     println!("Message send status={}", res.status());
     ()
+}
+
+#[derive(Clone)]
+pub struct TwitchEmoteDatabase {
+    // A map of emotes and the url of the emote.
+    emote_map: HashMap<String, String>,
+}
+
+impl EmoteDatabase for TwitchEmoteDatabase {}
+
+impl TwitchEmoteDatabase {
+    fn new() -> Self {
+        Self {
+            emote_map: HashMap::new(),
+        }
+    }
+
+    fn add_emote(&mut self, emote_key: &str, emote_url: &str) {
+        self.emote_map
+            .insert(String::from(emote_key), String::from(emote_url));
+    }
+}
+
+pub async fn create_twitch_emote_database(
+    stream_name: String,
+) -> crate::stream::base::EmoteDatabaseEnum {
+    println!(
+        "[emote_db][twitch] Initializing for stream: {}",
+        stream_name
+    );
+
+    let (api_config, app_config) = crate::app_util::AppData::get_configs().await;
+    if app_config.twitch_auth.is_none() {
+        eprintln!("[emote_db] user is not authenticated...");
+        return crate::stream::base::EmoteDatabaseEnum::NoDatabase;
+    }
+    println!("[emote_db] Requesting user id for stramer: {}", stream_name);
+    match get_user_id_from_name(
+        Some(&stream_name),
+        &api_config.twitch_api_client_id,
+        &app_config.twitch_auth.as_ref().unwrap().access_token,
+    )
+    .await
+    {
+        Err(_) => {
+            eprintln!(
+                "[emote_db][twitch] could not get user_id from name: {}",
+                stream_name
+            );
+            crate::stream::base::EmoteDatabaseEnum::NoDatabase
+        }
+        Ok(streamer_id) => {
+            // Get the channel emotes...
+            let client = reqwest::Client::new();
+            if streamer_id.is_none() {
+                eprintln!(
+                    "[emote_db][twitch] could not get user_id from name: {}",
+                    stream_name
+                );
+                return crate::stream::base::EmoteDatabaseEnum::NoDatabase;
+            }
+            let streamer_id = streamer_id.unwrap();
+            let response = client
+                .get(format!(
+                    "https://api.twitch.tv/helix/chat/emotes?broadcaster_id={}",
+                    streamer_id
+                ))
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", app_config.twitch_auth.unwrap().access_token),
+                )
+                .header("Client-Id", api_config.twitch_api_client_id)
+                .send()
+                .await;
+
+            if response.is_err() || response.as_ref().unwrap().status() != reqwest::StatusCode::OK {
+                eprintln!("[emote_db] Error fetching the channel emotes.");
+                return crate::stream::base::EmoteDatabaseEnum::NoDatabase;
+            }
+            let data = response.unwrap().text().await.unwrap();
+
+            struct EmoteInfo {
+                name: String,
+                urls_raw: serde_json::Value,
+                urls: HashMap<String, String>,
+            };
+
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(data.as_str()) {
+                // TODO: Parse the payload...
+                let mut emotes = payload
+                    .get("data")
+                    .and_then(|value| value.as_array())
+                    .unwrap()
+                    .into_iter()
+                    .map(|el| {
+                        (
+                            el.get("name").and_then(|value| value.as_str()),
+                            el.get("images"),
+                        )
+                    })
+                    .filter(|(emote_name, images)| emote_name.is_some() && images.is_some())
+                    .map(|(emote_name, images)| EmoteInfo {
+                        name: String::from(emote_name.unwrap()),
+                        urls_raw: images.unwrap().clone(),
+                        urls: HashMap::new(),
+                    })
+                    .collect::<Vec<EmoteInfo>>();
+
+                // Parse the urls_raw to their url components
+                for emote_info in &mut emotes {
+                    let url_keys = ["url_1x", "url_2x", "url_4x"];
+                    for url_key in url_keys {
+                        let url_value = emote_info
+                            .urls_raw
+                            .get(url_key)
+                            .and_then(|v| v.as_str())
+                            .unwrap();
+                        emote_info
+                            .urls
+                            .insert(String::from(url_key), String::from(url_value));
+                    }
+                }
+
+                let mut emote_db = TwitchEmoteDatabase::new();
+                println!("Found {} emotes", emotes.len());
+                for emote in &emotes {
+                    emote_db.add_emote(emote.name.as_str(), emote.urls["url_1x"].as_str());
+                }
+                crate::stream::base::EmoteDatabaseEnum::TwitchEmoteDatabase(emote_db)
+            } else {
+                crate::stream::base::EmoteDatabaseEnum::NoDatabase
+            }
+        }
+    }
 }

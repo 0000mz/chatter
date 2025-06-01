@@ -1,11 +1,12 @@
 #![feature(vec_deque_truncate_front)]
 
 mod stream;
-use stream::base::UserMessage;
+use stream::base::EmoteDatabase;
 use stream::base::MessageStream;
+use stream::base::UserMessage;
 
 mod app_util;
-use app_util::{AppData, ApiConfig, AppConfig};
+use app_util::{ApiConfig, AppConfig, AppData};
 
 use iced::widget::{column, rich_text, row, span};
 use iced::{Font, color, font};
@@ -33,11 +34,13 @@ enum ChatStreamMessage {
     // subscription successfully.
     MessageStreamInitState(bool),
     MessagePost(UserMessage),
+    InitializeEmoteDb,
 }
 
 #[derive(Clone)]
 enum Message {
     InitializeApp,
+
     OpenChatStream(String),
     CloseActiveChatStream,
     ChatStreamError(Result<(), String>),
@@ -46,6 +49,10 @@ enum Message {
     InputMessageChanged(String),
     SendInputMessage,
     SwitchActiveChat(String),
+    // Attach the emote_db to the chat instance associated with the
+    // stream_id (enum.0).
+    AttachEmoteDatabase(String, crate::stream::base::EmoteDatabaseEnum),
+
     HandleError(String),
     // If true, the command palette will be set to active.
     // Otherwise, it will be set to inactive.
@@ -91,6 +98,7 @@ struct ChatInstance {
     cancel_task: Option<tokio_util::sync::CancellationToken>,
     broadcaster_name: Option<String>,
     broadcaster_id: Option<String>,
+    emote_db: Option<Box<dyn EmoteDatabase>>,
 }
 
 struct StreamChat {
@@ -195,6 +203,7 @@ impl StreamChat {
                         cancel_task: None,
                         broadcaster_id: None,
                         broadcaster_name: None,
+                        emote_db: None,
                     };
                     println!("Inserting new chat instance: {}", stream_name);
                     self.chat_instances
@@ -237,6 +246,13 @@ impl StreamChat {
                 }
             },
             Message::HandleChatStreamOutput(message) => match message {
+                ChatStreamMessage::InitializeEmoteDb => {
+                    let instance = self.active_chat_instance.clone();
+                    iced::Task::perform(
+                        stream::twitch::create_twitch_emote_database(instance.clone()),
+                        |result| Message::AttachEmoteDatabase(instance, result),
+                    )
+                }
                 ChatStreamMessage::SaveUserId(user_id) => {
                     self.user_id = Some(user_id);
                     iced::Task::none()
@@ -455,6 +471,30 @@ impl StreamChat {
                 }
                 iced::Task::none()
             }
+            Message::AttachEmoteDatabase(chat_instance_id, emote_db) => match emote_db {
+                crate::stream::base::EmoteDatabaseEnum::NoDatabase => {
+                    eprintln!(
+                        "[emote_db] No emote db initialized for chat instance: {}",
+                        chat_instance_id
+                    );
+                    iced::Task::none()
+                }
+                crate::stream::base::EmoteDatabaseEnum::TwitchEmoteDatabase(db) => {
+                    match self.get_chat_instance_mut(&chat_instance_id) {
+                        None => {
+                            eprintln!(
+                                "No chat instance found w/ id ({}) to attach emote database to.",
+                                chat_instance_id
+                            );
+                            iced::Task::none()
+                        }
+                        Some(instance) => {
+                            instance.emote_db = Some(Box::new(db));
+                            iced::Task::none()
+                        }
+                    }
+                }
+            },
             Message::Nothing(_) => iced::Task::none(),
         }
     }
@@ -676,15 +716,21 @@ impl StreamChat {
         results.into()
     }
 
-    fn get_active_chat_instance_mut(&mut self) -> Option<&mut ChatInstance> {
-        if self.chat_instances.contains_key(&self.active_chat_instance) {
-            match self.chat_instances.get_mut(&self.active_chat_instance) {
+    fn get_chat_instance_mut(&mut self, chat_instance_id: &str) -> Option<&mut ChatInstance> {
+        if self.chat_instances.contains_key(chat_instance_id) {
+            match self.chat_instances.get_mut(chat_instance_id) {
                 Some(instance) => Some(instance),
                 None => None,
             }
         } else {
             None
         }
+    }
+
+    fn get_active_chat_instance_mut(&mut self) -> Option<&mut ChatInstance> {
+        // TODO: opt - I don't like this clone...
+        let id = self.active_chat_instance.clone();
+        self.get_chat_instance_mut(&id)
     }
 }
 
@@ -900,7 +946,9 @@ async fn create_message_stream(url: &str) -> std::result::Result<Box<dyn Message
     let (protocol, path) = (url_parts[0], url_parts[1]);
     match protocol {
         "file" => Ok(Box::new(stream::csv::CsvMessageStream::new_from_file(path))),
-        "twitch" => Ok(Box::new(stream::twitch::TwitchMessageStream::new_for_stream(path).await)),
+        "twitch" => Ok(Box::new(
+            stream::twitch::TwitchMessageStream::new_for_stream(path).await,
+        )),
         _ => Err(String::from(format!("Invalid protocol: {}", protocol))),
     }
 }
@@ -924,6 +972,7 @@ fn subscribe_to_chat_stream(url: String) -> impl iced::task::Straw<(), ChatStrea
                         ))
                         .await;
                     output.send(ChatStreamMessage::SaveUserId(user_id)).await;
+                    output.send(ChatStreamMessage::InitializeEmoteDb).await;
                 } else {
                     output
                         .send(ChatStreamMessage::InitializeChatError(String::from(

@@ -42,3 +42,11 @@ pub trait MessageStream: Send + Sync {
         Option<tokio_util::sync::CancellationToken>,
     )>;
 }
+
+pub trait EmoteDatabase {}
+
+#[derive(Clone)]
+pub enum EmoteDatabaseEnum {
+    TwitchEmoteDatabase(crate::stream::twitch::TwitchEmoteDatabase),
+    NoDatabase,
+}

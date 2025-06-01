@@ -1,8 +1,9 @@
-use crate::stream::base::UserMessage;
+use crate::stream::base::EmoteDatabase;
 use crate::stream::base::MessageStream;
+use crate::stream::base::UserMessage;
 
-use std::collections::VecDeque;
 use async_trait::async_trait;
+use std::collections::VecDeque;
 
 pub struct CsvMessageStream {
     messages: VecDeque<UserMessage>,
@@ -47,7 +48,6 @@ impl CsvMessageStream {
     }
 }
 
-
 #[async_trait]
 impl MessageStream for CsvMessageStream {
     fn get_broadcaster_and_user_id(
@@ -76,3 +76,8 @@ impl MessageStream for CsvMessageStream {
         next_user_message
     }
 }
+
+#[derive(Clone)]
+struct CsvEmoteDatabase;
+
+impl EmoteDatabase for CsvEmoteDatabase {}
