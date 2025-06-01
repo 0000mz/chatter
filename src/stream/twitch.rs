@@ -1,10 +1,10 @@
-use crate::stream::base::UserMessage;
+use crate::app_util::{ApiConfig, AppConfig, AppData};
 use crate::stream::base::MessageStream;
-use crate::app_util::{AppData, ApiConfig, AppConfig};
+use crate::stream::base::UserMessage;
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use iced::futures::StreamExt;
+use serde::{Deserialize, Serialize};
 
 pub struct TwitchMessageStream {
     stream_name: String,
@@ -134,26 +134,17 @@ async fn get_user_id_from_name(
     let client = reqwest::Client::new();
 
     let bearer_str = format!("Bearer {}", access_token);
-
-    let mut headers = reqwest::header::HeaderMap::new();
-    headers.insert(
-        "Authorization",
-        reqwest::header::HeaderValue::from_str(bearer_str.as_str()).unwrap(),
-    );
-    headers.insert(
-        "Client-Id",
-        reqwest::header::HeaderValue::from_str(client_id).unwrap(),
-    );
-    headers.insert(
-        "Content-Type",
-        reqwest::header::HeaderValue::from_static("application/json"),
-    );
-
     let url = match user_name {
         Some(user_name) => format!("https://api.twitch.tv/helix/users?login={}", user_name),
         None => String::from("https://api.twitch.tv/helix/users"),
     };
-    let response = client.get(url).headers(headers).send().await?;
+    let response = client
+        .get(url)
+        .header("Authorization", bearer_str)
+        .header("Client-Id", client_id)
+        .header("Content-Type", "application/json")
+        .send()
+        .await?;
 
     if response.status() != reqwest::StatusCode::OK {
         Ok(None)
@@ -423,20 +414,6 @@ async fn auth_twitch_chat_event_sub_init(
 ) -> Result<bool, reqwest::Error> {
     let client = reqwest::Client::new();
     let bearer_str = format!("Bearer {}", access_token);
-    let mut headers = reqwest::header::HeaderMap::new();
-    headers.insert(
-        "Authorization",
-        reqwest::header::HeaderValue::from_str(bearer_str.as_str()).unwrap(),
-    );
-    headers.insert(
-        "Client-Id",
-        reqwest::header::HeaderValue::from_str(client_id).unwrap(),
-    );
-    headers.insert(
-        "Content-Type",
-        reqwest::header::HeaderValue::from_static("application/json"),
-    );
-
     #[derive(Serialize)]
     struct InlineEventSubCondition {
         broadcaster_user_id: String,
@@ -473,7 +450,9 @@ async fn auth_twitch_chat_event_sub_init(
 
     let response = client
         .post("https://api.twitch.tv/helix/eventsub/subscriptions")
-        .headers(headers)
+        .header("Authorization", bearer_str)
+        .header("Client-Id", client_id)
+        .header("Content-Type", "application/json")
         .json(&body)
         .send()
         .await?;
@@ -506,19 +485,6 @@ pub async fn send_message(
 
     let client = reqwest::Client::new();
     let bearer_str = format!("Bearer {}", access_token);
-    let mut headers = reqwest::header::HeaderMap::new();
-    headers.insert(
-        "Authorization",
-        reqwest::header::HeaderValue::from_str(bearer_str.as_str()).unwrap(),
-    );
-    headers.insert(
-        "Client-Id",
-        reqwest::header::HeaderValue::from_str(client_id.as_str()).unwrap(),
-    );
-    headers.insert(
-        "Content-Type",
-        reqwest::header::HeaderValue::from_static("application/json"),
-    );
 
     #[derive(Serialize)]
     struct TwitchMessageSendBody {
@@ -535,7 +501,9 @@ pub async fn send_message(
 
     let res = client
         .post("https://api.twitch.tv/helix/chat/messages")
-        .headers(headers)
+        .header("Authorization", bearer_str)
+        .header("Client-Id", client_id)
+        .header("Content-Type", "application/json")
         .json(&body)
         .send()
         .await
