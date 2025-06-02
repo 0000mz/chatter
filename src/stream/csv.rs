@@ -80,4 +80,8 @@ impl MessageStream for CsvMessageStream {
 #[derive(Clone)]
 struct CsvEmoteDatabase;
 
-impl EmoteDatabase for CsvEmoteDatabase {}
+impl EmoteDatabase for CsvEmoteDatabase {
+    fn get_emote(&self, _: &str) -> Option<&iced::widget::image::Handle> {
+        None
+    }
+}

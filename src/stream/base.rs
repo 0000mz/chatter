@@ -43,7 +43,11 @@ pub trait MessageStream: Send + Sync {
     )>;
 }
 
-pub trait EmoteDatabase {}
+pub trait EmoteDatabase {
+    // Returns the emote image handle associated with the string `s`.
+    // Returns None if no emote is associated with the string.
+    fn get_emote(&self, s: &str) -> Option<&iced::widget::image::Handle>;
+}
 
 #[derive(Clone)]
 pub enum EmoteDatabaseEnum {

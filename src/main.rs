@@ -543,32 +543,62 @@ impl StreamChat {
         let mut v = column![];
         if let Some(instance) = self.chat_instances.get(&self.active_chat_instance) {
             for msg in &instance.active_messages {
+                let message_emote_parts = match instance.emote_db.as_ref() {
+                    Some(emote_db) => partition_message_to_emote_and_message_parts(
+                        msg.message.as_str(),
+                        emote_db.as_ref(),
+                    ),
+                    None => {
+                        vec![MessagePart::TextMessage(msg.message.clone())]
+                    }
+                };
+
+                let text_size = 16;
+                let mut message_row = row![
+                    rich_text![
+                        span(format!("{}: ", &msg.username))
+                            .color(color!(0x000000))
+                            .font(Font {
+                                weight: font::Weight::Bold,
+                                ..Font::default()
+                            })
+                    ]
+                    .on_link_click(|_link: u32| Message::Terminate)
+                    .size(text_size)
+                ];
+                for message_emote in message_emote_parts {
+                    match message_emote {
+                        MessagePart::Emote(emote_handle) => {
+                            message_row = message_row
+                                .push(iced::widget::image::viewer(emote_handle).height(text_size));
+                        }
+                        MessagePart::TextMessage(message) => {
+                            message_row = message_row.push(
+                                rich_text![span(message).color(color!(0x212121))]
+                                    .font(Font {
+                                        weight: font::Weight::Normal,
+                                        ..Font::default()
+                                    })
+                                    .on_link_click(|_link: u32| Message::Terminate)
+                                    .size(text_size),
+                            );
+                        }
+                    }
+                }
+
                 v = v.push(
-                    iced::widget::container(
-                        rich_text![
-                            span(format!("{}: ", &msg.username))
-                                .color(color!(0x000000))
-                                .font(Font {
-                                    weight: font::Weight::Bold,
-                                    ..Font::default()
-                                }),
-                            span(&msg.message).color(color!(0x212121))
-                        ]
-                        // Filler to supress compiler.
-                        .on_link_click(|_link: u32| Message::Terminate)
-                        .size(14),
-                    )
-                    .style(
-                        if let Some(user_id) = self.user_id.as_ref()
-                            && msg.user_id.as_str() == user_id.as_str()
-                        {
-                            AppStyle::highlighted_comment
-                        } else {
-                            AppStyle::unhighlighted_comment
-                        },
-                    )
-                    .padding([0, 10])
-                    .width(iced::Fill),
+                    iced::widget::container(message_row)
+                        .style(
+                            if let Some(user_id) = self.user_id.as_ref()
+                                && msg.user_id.as_str() == user_id.as_str()
+                            {
+                                AppStyle::highlighted_comment
+                            } else {
+                                AppStyle::unhighlighted_comment
+                            },
+                        )
+                        .padding([0, 10])
+                        .width(iced::Fill),
                 );
             }
         }
@@ -996,4 +1026,40 @@ fn subscribe_to_chat_stream(url: String) -> impl iced::task::Straw<(), ChatStrea
         }
         Ok(())
     })
+}
+
+enum MessagePart {
+    TextMessage(String),
+    // Handle to the emote to be rendered.
+    Emote(iced::widget::image::Handle),
+}
+fn partition_message_to_emote_and_message_parts(
+    message: &str,
+    emote_db: &dyn EmoteDatabase,
+) -> Vec<MessagePart> {
+    let mut parts = vec![];
+
+    let mut current_string = String::new();
+    for word in message.split_whitespace() {
+        match emote_db.get_emote(word) {
+            Some(handle) => {
+                if !current_string.is_empty() {
+                    parts.push(MessagePart::TextMessage(current_string.clone()));
+                }
+                current_string.clear();
+                parts.push(MessagePart::Emote(handle.clone()));
+            }
+            None => {
+                if current_string.len() > 0 {
+                    current_string += " ";
+                }
+                current_string += word;
+            }
+        }
+    }
+    if !current_string.is_empty() {
+        parts.push(MessagePart::TextMessage(current_string));
+    }
+
+    parts
 }

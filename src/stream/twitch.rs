@@ -526,7 +526,11 @@ pub struct TwitchEmoteDatabase {
     emote_handle_map: HashMap<String, iced::widget::image::Handle>,
 }
 
-impl EmoteDatabase for TwitchEmoteDatabase {}
+impl EmoteDatabase for TwitchEmoteDatabase {
+    fn get_emote(&self, s: &str) -> Option<&iced::widget::image::Handle> {
+        self.emote_handle_map.get(s)
+    }
+}
 
 impl TwitchEmoteDatabase {
     fn new() -> Self {
