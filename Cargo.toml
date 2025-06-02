@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 iced = { git = "https://github.com/iced-rs/iced.git", rev = "d39022432c778a8cda455f40b9c12245db86ce45", features = [
+  "image",
   "tokio",
   "sipper",
 ] }

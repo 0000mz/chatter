@@ -6,6 +6,7 @@ use crate::stream::base::MessageStream;
 use crate::stream::base::UserMessage;
 
 use async_trait::async_trait;
+use futures_util::future;
 use iced::futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
@@ -520,7 +521,9 @@ pub async fn send_message(
 #[derive(Clone)]
 pub struct TwitchEmoteDatabase {
     // A map of emotes and the url of the emote.
-    emote_map: HashMap<String, String>,
+    emote_url_map: HashMap<String, String>,
+    // A map of emotes and the image data for the emote.
+    emote_handle_map: HashMap<String, iced::widget::image::Handle>,
 }
 
 impl EmoteDatabase for TwitchEmoteDatabase {}
@@ -528,12 +531,13 @@ impl EmoteDatabase for TwitchEmoteDatabase {}
 impl TwitchEmoteDatabase {
     fn new() -> Self {
         Self {
-            emote_map: HashMap::new(),
+            emote_url_map: HashMap::new(),
+            emote_handle_map: HashMap::new(),
         }
     }
 
     fn add_emote(&mut self, emote_key: &str, emote_url: &str) {
-        self.emote_map
+        self.emote_url_map
             .insert(String::from(emote_key), String::from(emote_url));
     }
 }
@@ -576,77 +580,153 @@ pub async fn create_twitch_emote_database(
                 );
                 return crate::stream::base::EmoteDatabaseEnum::NoDatabase;
             }
+
+            let mut emote_db = TwitchEmoteDatabase::new();
             let streamer_id = streamer_id.unwrap();
-            let response = client
-                .get(format!(
+            let emote_urls = [
+                format!(
                     "https://api.twitch.tv/helix/chat/emotes?broadcaster_id={}",
                     streamer_id
-                ))
-                .header(
-                    "Authorization",
-                    format!("Bearer {}", app_config.twitch_auth.unwrap().access_token),
-                )
-                .header("Client-Id", api_config.twitch_api_client_id)
-                .send()
-                .await;
+                ),
+                String::from("https://api.twitch.tv/helix/chat/emotes/global"),
+            ];
+            for emote_url in emote_urls {
+                let response = client
+                    .get(emote_url)
+                    .header(
+                        "Authorization",
+                        format!(
+                            "Bearer {}",
+                            app_config.twitch_auth.as_ref().unwrap().access_token
+                        ),
+                    )
+                    .header("Client-Id", api_config.twitch_api_client_id.clone())
+                    .send()
+                    .await;
 
-            if response.is_err() || response.as_ref().unwrap().status() != reqwest::StatusCode::OK {
-                eprintln!("[emote_db] Error fetching the channel emotes.");
-                return crate::stream::base::EmoteDatabaseEnum::NoDatabase;
+                if response.is_err()
+                    || response.as_ref().unwrap().status() != reqwest::StatusCode::OK
+                {
+                    eprintln!("[emote_db] Error fetching the channel emotes.");
+                    return crate::stream::base::EmoteDatabaseEnum::NoDatabase;
+                }
+                let data = response.unwrap().text().await.unwrap();
+
+                struct EmoteInfo {
+                    name: String,
+                    urls_raw: serde_json::Value,
+                    urls: HashMap<String, String>,
+                };
+
+                if let Ok(payload) = serde_json::from_str::<serde_json::Value>(data.as_str()) {
+                    // TODO: Parse the payload...
+                    let mut emotes = payload
+                        .get("data")
+                        .and_then(|value| value.as_array())
+                        .unwrap()
+                        .into_iter()
+                        .map(|el| {
+                            (
+                                el.get("name").and_then(|value| value.as_str()),
+                                el.get("images"),
+                            )
+                        })
+                        .filter(|(emote_name, images)| emote_name.is_some() && images.is_some())
+                        .map(|(emote_name, images)| EmoteInfo {
+                            name: String::from(emote_name.unwrap()),
+                            urls_raw: images.unwrap().clone(),
+                            urls: HashMap::new(),
+                        })
+                        .collect::<Vec<EmoteInfo>>();
+
+                    // Parse the urls_raw to their url components
+                    for emote_info in &mut emotes {
+                        let url_keys = ["url_1x", "url_2x", "url_4x"];
+                        for url_key in url_keys {
+                            let url_value = emote_info
+                                .urls_raw
+                                .get(url_key)
+                                .and_then(|v| v.as_str())
+                                .unwrap();
+                            emote_info
+                                .urls
+                                .insert(String::from(url_key), String::from(url_value));
+                        }
+                    }
+
+                    println!("Found {} emotes", emotes.len());
+                    for emote in &emotes {
+                        emote_db.add_emote(emote.name.as_str(), emote.urls["url_1x"].as_str());
+                    }
+                }
             }
-            let data = response.unwrap().text().await.unwrap();
+            if emote_db.emote_url_map.is_empty() {
+                crate::stream::base::EmoteDatabaseEnum::NoDatabase
+            } else {
+                // Load the image data for each of the emotes.
+                let mut nb_failed_emotes = 0;
 
-            struct EmoteInfo {
-                name: String,
-                urls_raw: serde_json::Value,
-                urls: HashMap<String, String>,
-            };
+                let mut emote_bytes_futures = vec![];
 
-            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(data.as_str()) {
-                // TODO: Parse the payload...
-                let mut emotes = payload
-                    .get("data")
-                    .and_then(|value| value.as_array())
-                    .unwrap()
-                    .into_iter()
-                    .map(|el| {
-                        (
-                            el.get("name").and_then(|value| value.as_str()),
-                            el.get("images"),
-                        )
-                    })
-                    .filter(|(emote_name, images)| emote_name.is_some() && images.is_some())
-                    .map(|(emote_name, images)| EmoteInfo {
-                        name: String::from(emote_name.unwrap()),
-                        urls_raw: images.unwrap().clone(),
-                        urls: HashMap::new(),
-                    })
-                    .collect::<Vec<EmoteInfo>>();
+                for (emote_name, emote_url) in &emote_db.emote_url_map {
+                    emote_bytes_futures
+                        .push(fetch_emote_handle(emote_name.clone(), emote_url.clone()));
+                }
 
-                // Parse the urls_raw to their url components
-                for emote_info in &mut emotes {
-                    let url_keys = ["url_1x", "url_2x", "url_4x"];
-                    for url_key in url_keys {
-                        let url_value = emote_info
-                            .urls_raw
-                            .get(url_key)
-                            .and_then(|v| v.as_str())
-                            .unwrap();
-                        emote_info
-                            .urls
-                            .insert(String::from(url_key), String::from(url_value));
+                let emote_handle_results = future::join_all(emote_bytes_futures).await;
+                for emote_image_result in emote_handle_results {
+                    match emote_image_result {
+                        Some((emote_name, emote_image_handle)) => {
+                            emote_db
+                                .emote_handle_map
+                                .insert(emote_name, emote_image_handle);
+                        }
+                        None => {
+                            nb_failed_emotes += 1;
+                        }
                     }
                 }
 
-                let mut emote_db = TwitchEmoteDatabase::new();
-                println!("Found {} emotes", emotes.len());
-                for emote in &emotes {
-                    emote_db.add_emote(emote.name.as_str(), emote.urls["url_1x"].as_str());
-                }
+                println!(
+                    "[emote_db][twitch] # failed emotes: {}/{}",
+                    nb_failed_emotes,
+                    emote_db.emote_url_map.len()
+                );
+                println!("Total emote size: {}", emote_db.emote_url_map.len());
                 crate::stream::base::EmoteDatabaseEnum::TwitchEmoteDatabase(emote_db)
-            } else {
-                crate::stream::base::EmoteDatabaseEnum::NoDatabase
             }
         }
     }
+}
+
+async fn fetch_emote_handle(
+    emote_name: String,
+    emote_url: String,
+) -> Option<(String, iced::widget::image::Handle)> {
+    let delays_ms = [None, Some(100), Some(500)];
+
+    for delay_ms in delays_ms {
+        if let Some(delay_ms) = delay_ms {
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        }
+        let client = reqwest::Client::new();
+        let res = client.get(&emote_url).send().await;
+        if let Err(_) = res {
+            continue;
+        } else {
+            let res = res.unwrap();
+            let bytes = res.bytes().await;
+            if let Err(_) = bytes {
+                continue;
+            }
+            let bytes = bytes.unwrap();
+            return Some((emote_name, iced::widget::image::Handle::from_bytes(bytes)));
+        }
+    }
+    println!(
+        "Failed to get emote: {} after {} retries",
+        emote_name,
+        delays_ms.len()
+    );
+    None
 }
